@@ -1032,6 +1032,7 @@
 			stopChatObserver('查找尝试次数过多');
 			isProcessing = false;
 			currentState = 'idle';
+			notifyScriptB({ status: 'fail', reason: 'search_attempts_exceeded', detail: `查找尝试${searchAttemptCount}次` });
 			return false;
 		}
 
@@ -1050,6 +1051,7 @@
 			stopChatObserver();
 			isProcessing = false;
 			currentRetryUser = null;
+			notifyScriptB({ status: 'fail', reason: 'no_target_user' });
 			return false;
 		}
 
@@ -1192,8 +1194,10 @@
 
 				addHistoryLog(`已达到最大重试次数 (${userConfig.maxRetryCount})，${userConfig.autoRetryInterval}分钟后将自动重试`, 'error');
 				startAutoRetryTimer();
+				notifyScriptB({ status: 'fail', reason: 'max_retry_will_retry', retryCount: retryCount, nextRetryMinutes: userConfig.autoRetryInterval });
 			} else {
 				addHistoryLog(`已达到最大重试次数 (${userConfig.maxRetryCount})，停止重试`, 'error');
+				notifyScriptB({ status: 'fail', reason: 'max_retry_stopped', retryCount: retryCount });
 			}
 
 			isProcessing = false;
