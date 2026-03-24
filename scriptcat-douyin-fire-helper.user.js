@@ -14,6 +14,7 @@
 // @grant        GM_deleteValue
 // @grant        GM_xmlhttpRequest
 // @connect      hitokoto.cn
+// @connect      localhost
 // ==/UserScript==
 
 (function() {
@@ -67,7 +68,9 @@
 		autoRetryEnabled: false,
 		autoRetryInterval: 10,
 		retryAfterMaxReached: true,
-		retryResetInterval: 10
+		retryResetInterval: 10,
+		enableScriptBCallback: false,
+		scriptBCallbackPort: 7788
 	};
 
 	// 状态变量
@@ -1093,7 +1096,10 @@
 								setTimeout(sendMessage, 2000);
 							} else {
 								addHistoryLog('所有用户发送完成！', 'success');
+								notifyScriptB({ mode: 'multi', status: 'success', totalSent: sentUsersToday.length });
 							}
+						} else {
+							notifyScriptB({ mode: 'single', status: 'success' });
 						}
 
 						if (typeof GM_notification !== 'undefined') {
@@ -3180,6 +3186,20 @@
 		addHistoryLog('设置已保存', 'success');
 
 		startRetryResetTimer();
+	}
+
+	// 通知脚本B（调度器）当前账号所有任务已完成
+	function notifyScriptB(payload) {
+		if (!userConfig.enableScriptBCallback) return;
+		const port = userConfig.scriptBCallbackPort || 7788;
+		GM_xmlhttpRequest({
+			method: 'POST',
+			url: `http://localhost:${port}/done`,
+			headers: { 'Content-Type': 'application/json' },
+			data: JSON.stringify(Object.assign({ timestamp: Date.now() }, payload)),
+			onerror: () => addHistoryLog('通知脚本B失败（连接错误）', 'error'),
+			onload: (res) => addHistoryLog(`已通知脚本B，响应: ${res.status}`, 'info')
+		});
 	}
 
 	// 启动定时重置重试任务
