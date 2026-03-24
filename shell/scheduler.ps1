@@ -122,6 +122,30 @@ function Wait-Until {
     Start-Sleep -Seconds ([Math]::Max(1, [int]$diff.TotalSeconds))
 }
 
+# ==================== 计算距离指定时间的秒数 ====================
+function Get-SecondsUntil {
+    param([string]$TimeStr)
+
+    $parts  = $TimeStr -split ':'
+    $target = (Get-Date).Date.AddHours([int]$parts[0]).AddMinutes([int]$parts[1])
+    if ($parts.Count -ge 3) { $target = $target.AddSeconds([int]$parts[2]) }
+
+    if ($target -le (Get-Date)) { $target = $target.AddDays(1) }
+
+    return [int]($target - (Get-Date)).TotalSeconds
+}
+
+# ==================== 检查指定时间今天是否已过 ====================
+function Test-TimePastToday {
+    param([string]$TimeStr)
+
+    $parts  = $TimeStr -split ':'
+    $target = (Get-Date).Date.AddHours([int]$parts[0]).AddMinutes([int]$parts[1])
+    if ($parts.Count -ge 3) { $target = $target.AddSeconds([int]$parts[2]) }
+
+    return (Get-Date) -ge $target
+}
+
 # ==================== 查找 Python ====================
 function Find-Python {
     foreach ($name in @("python3", "python")) {
@@ -215,14 +239,20 @@ function Main {
 
     $config = Get-Config
 
-    Write-Log "发送时间: $($config.send_time) | 端口: $($config.callback_port) | 超时: $($config.timeout_seconds)秒"
+    $defaultSendTime = $config.send_time
+    Write-Log "全局发送时间: $defaultSendTime | 端口: $($config.callback_port) | 超时: $($config.timeout_seconds)秒"
     Write-Log "默认浏览器: $($config.default_browser) | 账号数: $($config.accounts.Count)"
 
-    while ($true) {
-        if ($Mode -eq "daemon") {
-            Wait-Until -TimeStr $config.send_time
-        }
+    # 打印每个账号的发送时间
+    for ($i = 0; $i -lt $config.accounts.Count; $i++) {
+        $acct = $config.accounts[$i]
+        if (-not $acct.enabled) { continue }
+        $acctTime = if ($acct.send_time) { $acct.send_time } else { $defaultSendTime }
+        Write-Log "  $($acct.name): 发送时间 $acctTime"
+    }
 
+    if ($Mode -ne "daemon") {
+        # ---- once 模式：立即执行所有已启用账号 ----
         Write-Log ""
         Write-Log "═══════════════════════════════════════"
         Write-Log " 开始执行 $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
@@ -261,11 +291,89 @@ function Main {
         Write-Log "═══════════════════════════════════════"
         Write-Log " 任务完成: 成功=$success  失败=$fail"
         Write-Log "═══════════════════════════════════════"
+    }
+    else {
+        # ---- daemon 模式：按每个账号的 send_time 分别调度 ----
+        $executedToday = @{}
+        $currentDay = (Get-Date).ToString("yyyyMMdd")
 
-        if ($Mode -ne "daemon") { break }
+        while ($true) {
+            # 日期变更时重置
+            $today = (Get-Date).ToString("yyyyMMdd")
+            if ($today -ne $currentDay) {
+                Write-Log "新的一天，重置执行记录"
+                $executedToday = @{}
+                $currentDay = $today
+            }
 
-        # 防止同一分钟重复触发
-        Start-Sleep -Seconds 61
+            # 找到下一个需要执行的账号
+            $nextIndex   = -1
+            $nextSeconds = 999999
+            $nextTimeStr = ""
+
+            for ($i = 0; $i -lt $config.accounts.Count; $i++) {
+                $acct = $config.accounts[$i]
+                if (-not $acct.enabled) { continue }
+                if ($executedToday.ContainsKey($i)) { continue }
+
+                $acctTime = if ($acct.send_time) { $acct.send_time } else { $defaultSendTime }
+
+                # 时间已过且未执行 → 立即执行
+                if (Test-TimePastToday -TimeStr $acctTime) {
+                    $nextIndex   = $i
+                    $nextSeconds = 0
+                    $nextTimeStr = $acctTime
+                    break
+                }
+
+                $secs = Get-SecondsUntil -TimeStr $acctTime
+                if ($secs -lt $nextSeconds) {
+                    $nextSeconds = $secs
+                    $nextIndex   = $i
+                    $nextTimeStr = $acctTime
+                }
+            }
+
+            if ($nextIndex -eq -1) {
+                Write-Log "今日所有账号已执行完毕，等待至明天..."
+                $tomorrow = (Get-Date).Date.AddDays(1).AddSeconds(1)
+                $sleepSecs = [int]($tomorrow - (Get-Date)).TotalSeconds
+                Start-Sleep -Seconds ([Math]::Max(1, $sleepSecs))
+                continue
+            }
+
+            $acct    = $config.accounts[$nextIndex]
+            $browser = if ($acct.browser) { $acct.browser } else { $config.default_browser }
+
+            if ($nextSeconds -gt 0) {
+                Write-Log "下一个账号: $($acct.name) ($nextTimeStr)"
+                Wait-Until -TimeStr $nextTimeStr
+            }
+
+            Write-Log ""
+            Write-Log "═══════════════════════════════════════"
+            Write-Log " 执行账号: $($acct.name) @ $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            Write-Log "═══════════════════════════════════════"
+
+            $result = Invoke-AccountTask `
+                -Name         $acct.name `
+                -ProfilePath  $acct.profile_path `
+                -Browser      $browser `
+                -Port         $config.callback_port `
+                -Timeout      $config.timeout_seconds `
+                -Url          $config.target_url `
+                -BrowserPaths $config.browser_paths
+
+            if ($result) {
+                Write-Log "账号 $($acct.name) 完成" "SUCCESS"
+            } else {
+                Write-Log "账号 $($acct.name) 失败" "ERROR"
+            }
+
+            $executedToday[$nextIndex] = $true
+
+            Start-Sleep -Seconds 5
+        }
     }
 }
 

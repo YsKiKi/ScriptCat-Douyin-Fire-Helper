@@ -98,17 +98,17 @@ launch_browser() {
     fi
     log "启动浏览器: ${bin}"
 
+    # 将浏览器 stdout/stderr 重定向到日志，避免阻塞调用方
     case "$browser" in
         firefox|firefox-esr)
-            "$bin" --profile "$profile" --no-remote "$url" &;;
+            "$bin" --profile "$profile" --no-remote "$url" >>"$LOG_FILE" 2>&1 &;;
         chrome|edge)
-            "$bin" --user-data-dir="$profile" --no-first-run "$url" &;;
+            "$bin" --user-data-dir="$profile" --no-first-run "$url" >>"$LOG_FILE" 2>&1 &;;
     esac
     BROWSER_PID=$!
-    echo "$BROWSER_PID"
 }
 
-# ---- 等待到指定时间（跨平台 date 兼容） ----
+# ---- 等待到指定时间（跨平台 date 兼容），返回等待秒数 ----
 wait_until() {
     local send_time="$1"
     local wait_seconds
@@ -125,6 +125,32 @@ print(int((target - now).total_seconds()))
     local mins=$(((wait_seconds % 3600) / 60))
     log "距离下次发送 (${send_time}) 还有 ${hrs}小时${mins}分钟"
     sleep "$wait_seconds"
+}
+
+# ---- 计算距离指定时间的秒数（不 sleep，仅返回数值） ----
+seconds_until() {
+    local send_time="$1"
+    python3 -c "
+import datetime
+h, m, s = [int(x) for x in '${send_time}'.split(':')[:3]]
+now = datetime.datetime.now()
+target = now.replace(hour=h, minute=m, second=s, microsecond=0)
+if target <= now:
+    target += datetime.timedelta(days=1)
+print(int((target - now).total_seconds()))
+"
+}
+
+# ---- 检查指定时间是否已过（今天） ----
+is_time_past_today() {
+    local send_time="$1"
+    python3 -c "
+import datetime
+h, m, s = [int(x) for x in '${send_time}'.split(':')[:3]]
+now = datetime.datetime.now()
+target = now.replace(hour=h, minute=m, second=s, microsecond=0)
+print('yes' if now >= target else 'no')
+"
 }
 
 # ---- 处理单个账号 ----
@@ -152,8 +178,8 @@ process_account() {
     log "回调服务器已启动 (端口: ${port}, PID: ${SERVER_PID})"
 
     # 启动浏览器
-    local pid
-    pid=$(launch_browser "$browser" "$profile" "$url") || { kill "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""; return 1; }
+    launch_browser "$browser" "$profile" "$url" || { kill "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""; return 1; }
+    local pid="$BROWSER_PID"
     log "浏览器已启动 (PID: ${pid})"
     log "等待脚本A完成 (超时: ${timeout}秒)..."
 
@@ -200,27 +226,36 @@ main() {
     log " 模式: $( [[ "$mode" == "daemon" ]] && echo "守护进程" || echo "单次执行" )"
     log "═══════════════════════════════════════"
 
-    local send_time port timeout default_browser url account_count
-    send_time=$(cfg '.send_time')
+    local default_send_time port timeout default_browser url account_count
+    default_send_time=$(cfg '.send_time')
     port=$(cfg '.callback_port')
     timeout=$(cfg '.timeout_seconds')
     default_browser=$(cfg '.default_browser')
     url=$(cfg '.target_url')
     account_count=$(cfg '.accounts | length')
 
-    log "发送时间: ${send_time} | 端口: ${port} | 超时: ${timeout}秒"
+    log "全局发送时间: ${default_send_time} | 端口: ${port} | 超时: ${timeout}秒"
     log "默认浏览器: ${default_browser} | 账号数: ${account_count}"
 
-    while true; do
-        [[ "$mode" == "daemon" ]] && wait_until "$send_time"
+    # 打印每个账号的发送时间
+    for ((i = 0; i < account_count; i++)); do
+        local acct_name acct_time acct_enabled
+        acct_name=$(cfg ".accounts[$i].name")
+        acct_time=$(cfg ".accounts[$i].send_time // empty")
+        acct_enabled=$(cfg ".accounts[$i].enabled")
+        [[ -z "$acct_time" || "$acct_time" == "null" ]] && acct_time="$default_send_time"
+        [[ "$acct_enabled" != "true" ]] && continue
+        log "  ${acct_name}: 发送时间 ${acct_time}"
+    done
 
+    if [[ "$mode" != "daemon" ]]; then
+        # ---- once 模式：立即执行所有已启用账号 ----
         log ""
         log "═══════════════════════════════════════"
         log " 开始执行 $(date '+%Y-%m-%d %H:%M:%S')"
         log "═══════════════════════════════════════"
 
         local success=0 fail=0
-
         for ((i = 0; i < account_count; i++)); do
             local name profile browser enabled
             name=$(cfg ".accounts[$i].name")
@@ -241,7 +276,6 @@ main() {
                 ((fail++)) || true
             fi
 
-            # 账号间间隔
             if [[ $i -lt $((account_count - 1)) ]]; then
                 log "等待 5 秒后处理下一个账号..."
                 sleep 5
@@ -252,12 +286,99 @@ main() {
         log "═══════════════════════════════════════"
         log " 任务完成: 成功=${success}  失败=${fail}"
         log "═══════════════════════════════════════"
+    else
+        # ---- daemon 模式：按每个账号的 send_time 分别调度 ----
+        # 跟踪今天已执行的账号索引
+        local -A executed_today
+        local current_day
+        current_day=$(date +%Y%m%d)
 
-        [[ "$mode" != "daemon" ]] && break
+        while true; do
+            # 日期变更时重置已执行记录
+            local today
+            today=$(date +%Y%m%d)
+            if [[ "$today" != "$current_day" ]]; then
+                log "新的一天，重置执行记录"
+                executed_today=()
+                current_day="$today"
+            fi
 
-        # 防止同一分钟内重复触发
-        sleep 61
-    done
+            # 找到下一个需要执行的账号（最近的发送时间）
+            local next_index=-1
+            local next_seconds=999999
+            local next_time_str=""
+
+            for ((i = 0; i < account_count; i++)); do
+                local enabled acct_time
+                enabled=$(cfg ".accounts[$i].enabled")
+                [[ "$enabled" != "true" ]] && continue
+                [[ -n "${executed_today[$i]+x}" ]] && continue
+
+                acct_time=$(cfg ".accounts[$i].send_time // empty")
+                [[ -z "$acct_time" || "$acct_time" == "null" ]] && acct_time="$default_send_time"
+
+                # 检查该时间今天是否已过
+                local past
+                past=$(is_time_past_today "$acct_time")
+                if [[ "$past" == "yes" ]]; then
+                    # 时间已过且未执行 → 立即执行
+                    next_index=$i
+                    next_seconds=0
+                    next_time_str="$acct_time"
+                    break
+                fi
+
+                local secs
+                secs=$(seconds_until "$acct_time")
+                if [[ "$secs" -lt "$next_seconds" ]]; then
+                    next_seconds=$secs
+                    next_index=$i
+                    next_time_str="$acct_time"
+                fi
+            done
+
+            if [[ "$next_index" -eq -1 ]]; then
+                log "今日所有账号已执行完毕，等待至明天..."
+                # 睡眠到明天 00:00:01
+                local sleep_secs
+                sleep_secs=$(python3 -c "
+import datetime
+now = datetime.datetime.now()
+tomorrow = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=1, microsecond=0)
+print(int((tomorrow - now).total_seconds()))
+")
+                sleep "$sleep_secs"
+                continue
+            fi
+
+            local name profile browser
+            name=$(cfg ".accounts[$next_index].name")
+            profile=$(cfg ".accounts[$next_index].profile_path")
+            browser=$(cfg ".accounts[$next_index].browser // empty")
+            [[ -z "$browser" || "$browser" == "null" ]] && browser="$default_browser"
+
+            if [[ "$next_seconds" -gt 0 ]]; then
+                log "下一个账号: ${name} (${next_time_str})"
+                wait_until "$next_time_str"
+            fi
+
+            log ""
+            log "═══════════════════════════════════════"
+            log " 执行账号: ${name} @ $(date '+%Y-%m-%d %H:%M:%S')"
+            log "═══════════════════════════════════════"
+
+            if process_account "$name" "$profile" "$browser" "$port" "$timeout" "$url"; then
+                log_success "账号 ${name} 完成"
+            else
+                log_error "账号 ${name} 失败"
+            fi
+
+            executed_today[$next_index]=1
+
+            # 短暂间隔后继续检查下一个
+            sleep 5
+        done
+    fi
 }
 
 main "$@"

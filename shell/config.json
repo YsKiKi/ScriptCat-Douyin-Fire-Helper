@@ -15,12 +15,14 @@
             "name": "账号1-示例",
             "profile_path": "/path/to/firefox/profile1",
             "browser": "",
+            "send_time": "",
             "enabled": false
         },
         {
             "name": "账号2-示例",
             "profile_path": "/path/to/firefox/profile2",
             "browser": "",
+            "send_time": "08:00:00",
             "enabled": false
         }
     ]

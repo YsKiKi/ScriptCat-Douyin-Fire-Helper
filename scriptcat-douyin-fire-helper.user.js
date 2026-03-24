@@ -123,6 +123,9 @@
 	// 拖拽全局监听器是否已绑定
 	let dragListenersAttached = false;
 
+	// 已完成通知是否已发送（防止 autoSendIfNeeded 每秒重复通知脚本B）
+	let alreadyDoneNotified = false;
+
 	// ==================== 通用辅助函数 ====================
 
 	// 判断当前时间是否在配置的发送时间范围内（支持跨天）
@@ -1770,6 +1773,11 @@
 					addHistoryLog(reason, 'info');
 					sendMessage();
 				}
+			} else {
+				if (!alreadyDoneNotified) {
+					alreadyDoneNotified = true;
+					notifyScriptB({ mode: 'multi', status: 'already_done', totalSent: sentUsersToday.length });
+				}
 			}
 		} else {
 			const lastSentDate = GM_getValue('lastSentDate', '');
@@ -1782,6 +1790,11 @@
 						: `检测到今日未发送且已过${userConfig.sendTime}，自动发送`;
 					addHistoryLog(reason, 'info');
 					sendMessage();
+				}
+			} else {
+				if (!alreadyDoneNotified) {
+					alreadyDoneNotified = true;
+					notifyScriptB({ mode: 'single', status: 'already_done' });
 				}
 			}
 		}
@@ -2852,6 +2865,23 @@
                         </div>
                     </div>
                 </div>
+
+                <div class="settings-section">
+                    <h4 style="color: #fff; margin: 0 0 15px 0; font-size: 16px; font-weight: 600;">🔗 脚本B回调</h4>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 15px;">
+                            <input type="checkbox" id="dy-fire-settings-scriptb-callback" ${userConfig.enableScriptBCallback ? 'checked' : ''} style="margin-right: 10px;">
+                            <span style="color: #ccc;">启用脚本B回调</span>
+                        </label>
+                        <div style="font-size: 12px; color: #999; margin-top: 5px;">启用后，任务完成/失败时会向本地调度脚本B发送HTTP通知</div>
+                    </div>
+                    
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 8px; color: #ccc; font-weight: 500;">回调端口</label>
+                        <input type="number" id="dy-fire-settings-scriptb-port" min="1024" max="65535" value="${userConfig.scriptBCallbackPort}" style="width: 100%; padding: 12px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; box-sizing: border-box; color: #fff; font-size: 14px;">
+                        <div style="font-size: 12px; color: #999; margin-top: 5px;">调度脚本B监听的端口号（默认7788），需与脚本B配置一致</div>
+                    </div>
+                </div>
             </div>
 
             <div id="message-settings" class="settings-tab" style="display: none;">
@@ -3259,6 +3289,9 @@
 		const autoRetryInterval = parseInt(document.getElementById('dy-fire-settings-auto-retry-interval').value, 10);
 		const retryResetInterval = parseInt(document.getElementById('dy-fire-settings-retry-reset-interval').value, 10);
 
+		const enableScriptBCallback = document.getElementById('dy-fire-settings-scriptb-callback').checked;
+		const scriptBCallbackPort = parseInt(document.getElementById('dy-fire-settings-scriptb-port').value, 10);
+
 		const specialMonday = document.getElementById('dy-fire-settings-special-monday').value;
 		const specialTuesday = document.getElementById('dy-fire-settings-special-tuesday').value;
 		const specialWednesday = document.getElementById('dy-fire-settings-special-wednesday').value;
@@ -3331,6 +3364,11 @@
 			return;
 		}
 
+		if (isNaN(scriptBCallbackPort) || scriptBCallbackPort < 1024 || scriptBCallbackPort > 65535) {
+			addHistoryLog('回调端口必须是1024-65535之间的数字', 'error');
+			return;
+		}
+
 		userConfig.sendTimeRandom = timeRandom;
 		userConfig.sendTime = timeValue;
 		userConfig.sendTimeRangeStart = timeStart;
@@ -3361,6 +3399,9 @@
 		userConfig.retryAfterMaxReached = retryAfterMaxReached;
 		userConfig.autoRetryInterval = autoRetryInterval;
 		userConfig.retryResetInterval = retryResetInterval;
+
+		userConfig.enableScriptBCallback = enableScriptBCallback;
+		userConfig.scriptBCallbackPort = scriptBCallbackPort;
 
 		userConfig.specialHitokotoMonday = specialMonday;
 		userConfig.specialHitokotoTuesday = specialTuesday;
@@ -3480,6 +3521,26 @@
 		}
 
 		addHistoryLog('抖音续火助手已启动', 'info');
+
+		// 启动时立即检查是否已完成，通知脚本B（不受发送时间约束）
+		if (userConfig.enableScriptBCallback) {
+			const today = new Date().toDateString();
+			if (userConfig.enableTargetUser && allTargetUsers.length > 0) {
+				const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user));
+				if (unsentUsers.length === 0 && sentUsersToday.length > 0) {
+					addHistoryLog('启动时检测到所有用户今日已发送完成，通知脚本B', 'info');
+					alreadyDoneNotified = true;
+					notifyScriptB({ mode: 'multi', status: 'already_done', totalSent: sentUsersToday.length });
+				}
+			} else {
+				const lastSentDate = GM_getValue('lastSentDate', '');
+				if (lastSentDate === today) {
+					addHistoryLog('启动时检测到今日已发送完成，通知脚本B', 'info');
+					alreadyDoneNotified = true;
+					notifyScriptB({ mode: 'single', status: 'already_done' });
+				}
+			}
+		}
 
 		startRetryResetTimer();
 

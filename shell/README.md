@@ -81,7 +81,7 @@ google-chrome --user-data-dir=/path/to/profile1
 
 ```jsonc
 {
-    "send_time": "00:01:00",         // 每天发送时间 (HH:MM:SS)
+    "send_time": "00:01:00",         // 全局默认发送时间 (HH:MM:SS)
     "callback_port": 7788,           // 回调监听端口
     "timeout_seconds": 300,          // 单个账号最大等待时间(秒)
     "default_browser": "firefox",    // 默认浏览器: firefox / firefox-esr / chrome / edge
@@ -97,17 +97,21 @@ google-chrome --user-data-dir=/path/to/profile1
             "name": "我的主号",
             "profile_path": "/home/user/.mozilla/firefox/abc123.main",
             "browser": "",           // 留空使用 default_browser，也可单独指定
+            "send_time": "",         // 留空使用全局 send_time，也可单独指定如 "08:00:00"
             "enabled": true
         },
         {
             "name": "我的小号",
             "profile_path": "/home/user/.mozilla/firefox/def456.alt",
             "browser": "",
+            "send_time": "12:30:00", // 该账号在 12:30 执行（覆盖全局时间）
             "enabled": true
         }
     ]
 }
 ```
+
+> **提示**：每个账号可设置独立的 `send_time`。留空或省略则使用全局 `send_time`。在 daemon 模式下，调度器会按各账号的 `send_time` 分别等待并依次执行。
 
 ### 4. 运行
 
@@ -117,7 +121,7 @@ google-chrome --user-data-dir=/path/to/profile1
 # 赋予执行权限
 chmod +x scheduler.sh
 
-# 守护进程模式（等到 send_time 后自动执行，之后每天循环）
+# 守护进程模式（按各账号 send_time 分别等待执行，每天循环）
 ./scheduler.sh
 
 # 单次立即执行（测试用）
