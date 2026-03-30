@@ -1,11 +1,11 @@
-# 抖音续火助手 - 调度脚本B
+# 抖音续火助手 - 调度后端调度器
 
-自动定时启动浏览器、等待脚本A（UserScript）完成续火任务后关闭浏览器。支持多账号顺序执行。
+自动定时启动浏览器、等待浏览器执行脚本（UserScript）完成续火任务后关闭浏览器。支持多账号顺序执行。
 
 ## 架构
 
 ```
-脚本B (scheduler)                  脚本A (UserScript)
+后端调度器 (scheduler)                  浏览器执行脚本 (UserScript)
 ─────────────────                  ─────────────────
 1. 读取 config.json
 2. 等待到发送时间
@@ -69,12 +69,12 @@ google-chrome --user-data-dir=/path/to/profile1
 
 1. 使用该 Profile 启动浏览器
 2. 安装 **Tampermonkey** 或 **ScriptCat**
-3. 安装**脚本A**（抖音续火助手）
+3. 安装**浏览器执行脚本**（抖音续火助手）
 4. 访问 `https://creator.douyin.com/creator-micro/data/following/chat`
 5. **登录抖音账号**
-6. 在脚本A的设置面板中：
+6. 在浏览器执行脚本的设置面板中：
    - 配置续火目标用户、消息内容等
-   - **启用「脚本B回调」**（`enableScriptBCallback = true`）
+   - **启用「后端调度器回调」**（`enableScriptBCallback = true`）
    - 确认回调端口与 `config.json` 中的 `callback_port` 一致（默认 `7788`）
 
 ### 3. 编辑 config.json
@@ -183,8 +183,8 @@ chmod +x scheduler.sh
 
 | 问题 | 解决方案 |
 |---|---|
-| 端口被占用 | 修改 `config.json` 中的 `callback_port`，同时在脚本A设置中修改端口 |
+| 端口被占用 | 修改 `config.json` 中的 `callback_port`，同时在浏览器执行脚本设置中修改端口 |
 | 浏览器未找到 | 在 `config.json` 的 `browser_paths` 中填入完整路径 |
 | Firefox 报 Profile 已锁定 | 确保同一 Profile 没有其他 Firefox 实例在运行 |
-| 超时但脚本A未完成 | 增大 `timeout_seconds`；检查脚本A是否启用了回调 |
+| 超时但浏览器执行脚本未完成 | 增大 `timeout_seconds`；检查浏览器执行脚本是否启用了回调 |
 | Linux 无图形界面 | 安装 Xvfb：`apt install xvfb`，用 `xvfb-run ./scheduler.sh` 运行 |

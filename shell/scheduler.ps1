@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    抖音续火助手 - 调度脚本B (Windows)
+    抖音续火助手 - 后端调度器 (Windows)
 
 .DESCRIPTION
     读取 config.json，按顺序启动不同 Profile 的浏览器实例，
-    等待脚本A完成回调后关闭浏览器。
+    等待浏览器执行脚本完成回调后关闭浏览器。
 
 .PARAMETER Mode
     daemon - 守护进程模式，等待到配置的发送时间后执行（默认）
@@ -203,7 +203,7 @@ function Invoke-AccountTask {
         -BrowserPath $browserPath -ProfilePath $ProfilePath -Url $Url
 
     Write-Log "浏览器已启动 (PID: $($browserProcess.Id))"
-    Write-Log "等待脚本A完成 (超时: ${Timeout}秒)..."
+    Write-Log "等待浏览器执行脚本完成 (超时: ${Timeout}秒)..."
 
     # 等待回调服务器退出
     $serverProcess | Wait-Process -ErrorAction SilentlyContinue
@@ -233,7 +233,7 @@ function Invoke-AccountTask {
 # ==================== 主流程 ====================
 function Main {
     Write-Log "═══════════════════════════════════════"
-    Write-Log " 抖音续火助手 - 调度脚本B (Windows)"
+    Write-Log " 抖音续火助手 - 后端调度器 (Windows)"
     Write-Log " 模式: $(if ($Mode -eq 'daemon') { '守护进程' } else { '单次执行' })"
     Write-Log "═══════════════════════════════════════"
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# 抖音续火助手 - 调度脚本B (Linux / macOS)
+# 抖音续火助手 - 后端调度器 (Linux / macOS)
 #
 # 用法:
 #   ./scheduler.sh          # 守护进程模式，等待到配置时间后执行
@@ -181,7 +181,7 @@ process_account() {
     launch_browser "$browser" "$profile" "$url" || { kill "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""; return 1; }
     local pid="$BROWSER_PID"
     log "浏览器已启动 (PID: ${pid})"
-    log "等待脚本A完成 (超时: ${timeout}秒)..."
+    log "等待浏览器执行脚本完成 (超时: ${timeout}秒)..."
 
     # 等待回调
     local result=0
@@ -222,7 +222,7 @@ main() {
     fi
 
     log "═══════════════════════════════════════"
-    log " 抖音续火助手 - 调度脚本B"
+    log " 抖音续火助手 - 后端调度器"
     log " 模式: $( [[ "$mode" == "daemon" ]] && echo "守护进程" || echo "单次执行" )"
     log "═══════════════════════════════════════"
 

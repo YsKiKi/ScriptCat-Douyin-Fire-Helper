@@ -123,7 +123,7 @@
 	// 拖拽全局监听器是否已绑定
 	let dragListenersAttached = false;
 
-	// 已完成通知是否已发送（防止 autoSendIfNeeded 每秒重复通知脚本B）
+	// 已完成通知是否已发送（防止 autoSendIfNeeded 每秒重复通知后端调度器）
 	let alreadyDoneNotified = false;
 
 	// ==================== 通用辅助函数 ====================
@@ -2867,19 +2867,19 @@
                 </div>
 
                 <div class="settings-section">
-                    <h4 style="color: #fff; margin: 0 0 15px 0; font-size: 16px; font-weight: 600;">🔗 脚本B回调</h4>
+                    <h4 style="color: #fff; margin: 0 0 15px 0; font-size: 16px; font-weight: 600;">🔗 后端调度器回调</h4>
                     <div style="margin-bottom: 15px;">
                         <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 15px;">
                             <input type="checkbox" id="dy-fire-settings-scriptb-callback" ${userConfig.enableScriptBCallback ? 'checked' : ''} style="margin-right: 10px;">
-                            <span style="color: #ccc;">启用脚本B回调</span>
+                            <span style="color: #ccc;">启用后端调度器回调</span>
                         </label>
-                        <div style="font-size: 12px; color: #999; margin-top: 5px;">启用后，任务完成/失败时会向本地调度脚本B发送HTTP通知</div>
+                        <div style="font-size: 12px; color: #999; margin-top: 5px;">启用后，任务完成/失败时会向本地调度后端调度器发送HTTP通知</div>
                     </div>
                     
                     <div style="margin-bottom: 15px;">
                         <label style="display: block; margin-bottom: 8px; color: #ccc; font-weight: 500;">回调端口</label>
                         <input type="number" id="dy-fire-settings-scriptb-port" min="1024" max="65535" value="${userConfig.scriptBCallbackPort}" style="width: 100%; padding: 12px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; box-sizing: border-box; color: #fff; font-size: 14px;">
-                        <div style="font-size: 12px; color: #999; margin-top: 5px;">调度脚本B监听的端口号（默认7788），需与脚本B配置一致</div>
+                        <div style="font-size: 12px; color: #999; margin-top: 5px;">调度后端调度器监听的端口号（默认7788），需与后端调度器配置一致</div>
                     </div>
                 </div>
             </div>
@@ -3427,7 +3427,7 @@
 		startRetryResetTimer();
 	}
 
-	// 通知脚本B（调度器）当前账号所有任务已完成
+	// 通知后端调度器（调度器）当前账号所有任务已完成
 	function notifyScriptB(payload) {
 		if (!userConfig.enableScriptBCallback) return;
 		const port = userConfig.scriptBCallbackPort || 7788;
@@ -3436,8 +3436,8 @@
 			url: `http://localhost:${port}/done`,
 			headers: { 'Content-Type': 'application/json' },
 			data: JSON.stringify(Object.assign({ timestamp: Date.now() }, payload)),
-			onerror: () => addHistoryLog('通知脚本B失败（连接错误）', 'error'),
-			onload: (res) => addHistoryLog(`已通知脚本B，响应: ${res.status}`, 'info')
+			onerror: () => addHistoryLog('通知后端调度器失败（连接错误）', 'error'),
+			onload: (res) => addHistoryLog(`已通知后端调度器，响应: ${res.status}`, 'info')
 		});
 	}
 
@@ -3522,20 +3522,20 @@
 
 		addHistoryLog('抖音续火助手已启动', 'info');
 
-		// 启动时立即检查是否已完成，通知脚本B（不受发送时间约束）
+		// 启动时立即检查是否已完成，通知后端调度器（不受发送时间约束）
 		if (userConfig.enableScriptBCallback) {
 			const today = new Date().toDateString();
 			if (userConfig.enableTargetUser && allTargetUsers.length > 0) {
 				const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user));
 				if (unsentUsers.length === 0 && sentUsersToday.length > 0) {
-					addHistoryLog('启动时检测到所有用户今日已发送完成，通知脚本B', 'info');
+					addHistoryLog('启动时检测到所有用户今日已发送完成，通知后端调度器', 'info');
 					alreadyDoneNotified = true;
 					notifyScriptB({ mode: 'multi', status: 'already_done', totalSent: sentUsersToday.length });
 				}
 			} else {
 				const lastSentDate = GM_getValue('lastSentDate', '');
 				if (lastSentDate === today) {
-					addHistoryLog('启动时检测到今日已发送完成，通知脚本B', 'info');
+					addHistoryLog('启动时检测到今日已发送完成，通知后端调度器', 'info');
 					alreadyDoneNotified = true;
 					notifyScriptB({ mode: 'single', status: 'already_done' });
 				}

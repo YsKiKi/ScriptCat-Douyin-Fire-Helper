@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 抖音续火助手 - HTTP 回调监听服务器
-监听脚本A (UserScript) 发送的完成信号。
+监听浏览器执行脚本 (UserScript) 发送的完成信号。
 
 用法: python3 callback_server.py [端口] [超时秒数]
 退出码: 0=收到回调 1=超时 2=错误
@@ -14,7 +14,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 
 class CallbackHandler(BaseHTTPRequestHandler):
-    """处理脚本A发送的 POST /done 回调请求"""
+    """处理浏览器执行脚本发送的 POST /done 回调请求"""
     result = None
 
     def do_POST(self):
