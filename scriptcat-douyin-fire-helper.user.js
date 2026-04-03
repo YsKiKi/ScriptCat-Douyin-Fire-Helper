@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音续火花自动发送助手-支持多用户-多功能
 // @namespace    http://tampermonkey.net/
-// @version      2.0.2
+// @version      2.0.3
 // @description  每天自动发送续火消息，支持自定义时间，集成一言API和TXTAPI，支持多目标用户，记录火花天数，专属一言，随机发送时间，用户列表解析，自动重试，自动切换全部标签页，精简日志
 // @author       飔梦 / 阚泥 / xiaohe123awa / YsKiKi
 // @match        https://creator.douyin.com/creator-micro/data/following/chat
@@ -17,6 +17,7 @@
 // @connect      localhost
 // @updateURL    https://github.com/YsKiKi/ScriptCat-Douyin-Fire-Helper/releases/latest/download/scriptcat-douyin-fire-helper.user.js
 // @downloadURL  https://github.com/YsKiKi/ScriptCat-Douyin-Fire-Helper/releases/latest/download/scriptcat-douyin-fire-helper.user.js
+// @license      MIT
 // ==/UserScript==
 
 (function() {
@@ -367,7 +368,7 @@
 			if (chatContainer) {
 				const observer = new MutationObserver((mutations, obs) => {
 					setTimeout(() => {
-						const userElements = document.querySelectorAll('.item-header-name-vL_79m');
+						const userElements = document.querySelectorAll('[class*="item-header-name-"]');
 						if (userElements.length > 0) {
 							obs.disconnect();
 							resolve();
@@ -776,7 +777,7 @@
 			}
 		}
 
-		const sampleUser = document.querySelector('.item-header-name-vL_79m');
+		const sampleUser = document.querySelector('[class*="item-header-name-"]');
 		if (sampleUser) {
 			let parent = sampleUser;
 			for (let i = 0; i < 10; i++) {
@@ -944,7 +945,7 @@
 		// 滚动期间停止观察器避免干扰
 		stopChatObserver('开始滚动查找', true);
 
-		const ITEM_SEL = '.item-header-name-vL_79m';
+		const ITEM_SEL = '[class*="item-header-name-"]';
 		const NO_MORE_SEL = '.no-more-tip-ftdJnu';
 
 		// 查找可滚动的聊天列表容器
@@ -1080,7 +1081,7 @@
 		addHistoryLog(`查找目标用户: ${currentTargetUser}`, 'info');
 		updateUserStatus(`寻找: ${currentTargetUser}`, null);
 
-		const userElements = document.querySelectorAll('.item-header-name-vL_79m');
+		const userElements = document.querySelectorAll('[class*="item-header-name-"]');
 		let targetElement = null;
 
 		for (let element of userElements) {
@@ -2101,7 +2102,7 @@
 	// onNewItems(newNicknames[]) — 每轮新发现的昵称数组
 	// onDone() — 滚动结束
 	function autoScrollChatListAndCollect(panelEl, onNewItems, onDone) {
-		const ITEM_SEL = '.item-header-name-vL_79m';
+		const ITEM_SEL = '[class*="item-header-name-"]';
 		const NO_MORE_SEL = '.no-more-tip-ftdJnu';
 		const seen = new Set();
 
