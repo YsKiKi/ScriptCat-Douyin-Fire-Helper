@@ -66,7 +66,8 @@
 		retryAfterMaxReached: true,
 		retryResetInterval: 10,
 		enableScriptBCallback: false,
-		scriptBCallbackPort: 7788
+		scriptBCallbackPort: 7788,
+		backendRetryMinutes: 25
 	};
 
 	// 状态变量
@@ -86,6 +87,7 @@
 	// 多用户相关变量
 	let currentUserIndex = -1;
 	let sentUsersToday = [];
+	let failedUsersToday = [];    // 本次运行中所有重试都失败的用户
 	let allTargetUsers = [];
 	let currentRetryUser = null;
 
@@ -223,6 +225,7 @@
 		GM_setValue('retryCount', 0);
 		GM_setValue('isMaxRetryReached', false);
 		GM_setValue('lastRetryResetTime', 0);
+		GM_setValue('failedUsersToday', []);
 	}
 
 	// ==================== API拦截：捕获完整的用户列表 ====================
@@ -436,6 +439,11 @@
 		}
 		sentUsersToday = GM_getValue('sentUsersToday', []);
 
+		if (!GM_getValue('failedUsersToday')) {
+			GM_setValue('failedUsersToday', []);
+		}
+		failedUsersToday = GM_getValue('failedUsersToday', []);
+
 		if (GM_getValue('currentUserIndex') == null) {
 			GM_setValue('currentUserIndex', -1);
 		}
@@ -492,10 +500,10 @@
 			return null;
 		}
 
-		const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user));
+		const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user) && !failedUsersToday.includes(user));
 
 		if (unsentUsers.length === 0) {
-			addHistoryLog('所有目标用户今日都已发送', 'info');
+			addHistoryLog('所有目标用户今日都已发送或已耗尽重试', 'info');
 			return null;
 		}
 
@@ -737,7 +745,7 @@
 			try {
 				chatObserver.observe(document.body, {
 					childList: true,
-					subtree: false,
+					subtree: true,
 					attributes: false,
 					characterData: false
 				});
@@ -1031,11 +1039,18 @@
 		GM_setValue('searchAttemptCount', searchAttemptCount);
 
 		if (searchAttemptCount > 50) {
-			addHistoryLog(`查找尝试次数过多(${searchAttemptCount})，可能DOM结构已变化`, 'error');
+			addHistoryLog(`查找尝试次数过多(${searchAttemptCount})，标记当前用户为失败，切换下一用户`, 'error');
 			stopChatObserver('查找尝试次数过多');
+			if (userConfig.enableTargetUser && currentRetryUser) {
+				if (!failedUsersToday.includes(currentRetryUser)) {
+					failedUsersToday.push(currentRetryUser);
+					GM_setValue('failedUsersToday', failedUsersToday);
+				}
+				currentRetryUser = null;
+			}
 			isProcessing = false;
 			currentState = 'idle';
-			notifyScriptB({ status: 'fail', reason: 'search_attempts_exceeded', detail: `查找尝试${searchAttemptCount}次` });
+			checkAllUsersProcessed();
 			return false;
 		}
 
@@ -1049,12 +1064,12 @@
 		}
 
 		if (!currentTargetUser) {
-			addHistoryLog('没有可发送的目标用户', 'info');
+			addHistoryLog('没有可发送的目标用户（全部已完成或已耗尽重试）', 'info');
 			updateUserStatus('无目标用户', false);
 			stopChatObserver();
 			isProcessing = false;
 			currentRetryUser = null;
-			notifyScriptB({ status: 'fail', reason: 'no_target_user' });
+			checkAllUsersProcessed();
 			return false;
 		}
 
@@ -1189,6 +1204,25 @@
 		updateRetryCount();
 
 		if (retryCount > userConfig.maxRetryCount) {
+			// 多用户模式：仅标记当前用户失败，继续下一用户，所有用户全失败后才回调后端
+			if (userConfig.enableTargetUser && allTargetUsers.length > 0 && currentRetryUser) {
+				addHistoryLog(`用户 ${currentRetryUser} 已达到最大重试次数 (${userConfig.maxRetryCount})，标记为失败，切换下一用户`, 'error');
+				if (!failedUsersToday.includes(currentRetryUser)) {
+					failedUsersToday.push(currentRetryUser);
+					GM_setValue('failedUsersToday', failedUsersToday);
+				}
+				retryCount = 0;
+				GM_setValue('retryCount', 0);
+				updateRetryCount();
+				currentRetryUser = null;
+				isProcessing = false;
+				currentState = 'idle';
+				stopChatObserver('用户重试耗尽，切换下一用户');
+				checkAllUsersProcessed();
+				return;
+			}
+
+			// 单用户模式：保持原有逻辑
 			if (userConfig.retryAfterMaxReached) {
 				isMaxRetryReached = true;
 				lastRetryResetTime = Date.now();
@@ -1269,8 +1303,10 @@
 
 				retryCount = 0;
 				isMaxRetryReached = false;
+				failedUsersToday = [];
 				GM_setValue('retryCount', retryCount);
 				GM_setValue('isMaxRetryReached', false);
+				GM_setValue('failedUsersToday', []);
 				updateRetryCount();
 
 				sendMessage();
@@ -1763,7 +1799,7 @@
 				resetTodaySentUsers();
 			}
 
-			const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user));
+			const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user) && !failedUsersToday.includes(user));
 			if (unsentUsers.length > 0) {
 				const shouldSend = userConfig.sendTimeRandom ? isCurrentTimeInRange() : isAtOrPastSendTime();
 				if (shouldSend) {
@@ -1776,7 +1812,10 @@
 			} else {
 				if (!alreadyDoneNotified) {
 					alreadyDoneNotified = true;
-					notifyScriptB({ mode: 'multi', status: 'already_done', totalSent: sentUsersToday.length });
+					// 仅全部成功时才发 already_done，有失败用户时由 checkAllUsersProcessed 处理
+					if (failedUsersToday.length === 0) {
+						notifyScriptB({ mode: 'multi', status: 'already_done', totalSent: sentUsersToday.length });
+					}
 				}
 			}
 		} else {
@@ -1897,6 +1936,8 @@
 			sunday: []
 		};
 		GM_setValue('specialHitokotoSentIndexes', specialHitokotoSentIndexes);
+		failedUsersToday = [];
+		GM_setValue('failedUsersToday', []);
 		resetTodaySentUsers();
 		currentRetryUser = null;
 
@@ -2021,7 +2062,9 @@
 	// 重置今日发送记录
 	function resetTodaySentUsers() {
 		sentUsersToday = [];
+		failedUsersToday = [];
 		GM_setValue('sentUsersToday', []);
+		GM_setValue('failedUsersToday', []);
 		currentUserIndex = -1;
 		GM_setValue('currentUserIndex', -1);
 		GM_setValue('lastSentDate', '');
@@ -3427,16 +3470,70 @@
 		startRetryResetTimer();
 	}
 
+	// 检查是否所有用户均已处理完毕，决定是否回调后端
+	function checkAllUsersProcessed() {
+		if (!userConfig.enableTargetUser || allTargetUsers.length === 0) {
+			return;
+		}
+		const doneUsers = new Set([...sentUsersToday, ...failedUsersToday]);
+		const allDone = allTargetUsers.every(u => doneUsers.has(u));
+		if (!allDone) {
+			// 仍有未处理用户，继续下一个
+			if (!isProcessing) {
+				isProcessing = true;
+				setTimeout(executeSendProcess, 500);
+			}
+			return;
+		}
+		// 全部处理完毕
+		const successCount = sentUsersToday.length;
+		const failCount = failedUsersToday.length;
+		if (failCount === 0) {
+			// 全部成功，已由 tryFindChatInput 成功路径通知，此处不重复
+			return;
+		}
+		addHistoryLog(
+			`所有用户处理完毕：成功 ${successCount}，失败 ${failCount}（${failedUsersToday.join(', ')}）`,
+			successCount > 0 ? 'warn' : 'error'
+		);
+		if (successCount === 0 && userConfig.retryAfterMaxReached) {
+			isMaxRetryReached = true;
+			lastRetryResetTime = Date.now();
+			GM_setValue('isMaxRetryReached', true);
+			GM_setValue('lastRetryResetTime', lastRetryResetTime);
+			addHistoryLog(`全部失败，${userConfig.autoRetryInterval} 分钟后将重试所有失败用户`, 'info');
+			startAutoRetryTimer();
+		}
+		const status = successCount === 0 ? 'fail' : 'partial_success';
+		notifyScriptB({ mode: 'multi', status, sentCount: successCount, failCount });
+	}
+
 	// 通知后端调度器（调度器）当前账号所有任务已完成
 	function notifyScriptB(payload) {
 		if (!userConfig.enableScriptBCallback) return;
 		const port = userConfig.scriptBCallbackPort || 7788;
+		const retryMs = (userConfig.backendRetryMinutes || 25) * 60 * 1000;
+		const onBackendUnavailable = () => {
+			addHistoryLog(`后端调度器不可达，${userConfig.backendRetryMinutes || 25} 分钟后重试通知`, 'warn');
+			setTimeout(() => {
+				addHistoryLog('重试通知后端调度器...', 'info');
+				notifyScriptB(payload);
+			}, retryMs);
+		};
 		GM_xmlhttpRequest({
 			method: 'POST',
 			url: `http://localhost:${port}/done`,
 			headers: { 'Content-Type': 'application/json' },
 			data: JSON.stringify(Object.assign({ timestamp: Date.now() }, payload)),
-			onerror: () => addHistoryLog('通知后端调度器失败（连接错误）', 'error'),
+			timeout: 5000,
+			onerror: () => {
+				addHistoryLog('通知后端调度器失败（连接错误）', 'error');
+				onBackendUnavailable();
+			},
+			ontimeout: () => {
+				addHistoryLog('通知后端调度器超时', 'error');
+				onBackendUnavailable();
+			},
 			onload: (res) => addHistoryLog(`已通知后端调度器，响应: ${res.status}`, 'info')
 		});
 	}
@@ -3526,8 +3623,8 @@
 		if (userConfig.enableScriptBCallback) {
 			const today = new Date().toDateString();
 			if (userConfig.enableTargetUser && allTargetUsers.length > 0) {
-				const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user));
-				if (unsentUsers.length === 0 && sentUsersToday.length > 0) {
+				const unprocessedUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user) && !failedUsersToday.includes(user));
+				if (unprocessedUsers.length === 0 && sentUsersToday.length > 0) {
 					addHistoryLog('启动时检测到所有用户今日已发送完成，通知后端调度器', 'info');
 					alreadyDoneNotified = true;
 					notifyScriptB({ mode: 'multi', status: 'already_done', totalSent: sentUsersToday.length });

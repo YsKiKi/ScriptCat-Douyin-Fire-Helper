@@ -156,6 +156,7 @@ function Find-Python {
 }
 
 # ==================== 处理单个账号 ====================
+# 返回 hashtable: { Success=$bool; TimedOut=$bool; BrowserPid=$int }
 function Invoke-AccountTask {
     param(
         [string]$Name,
@@ -175,14 +176,14 @@ function Invoke-AccountTask {
     $browserPath = Find-Browser -Browser $Browser -BrowserPaths $BrowserPaths
     if (-not $browserPath) {
         Write-Log "未找到 $Browser 浏览器，请在 config.json 的 browser_paths 中指定路径" "ERROR"
-        return $false
+        return @{ Success = $false; TimedOut = $false; BrowserPid = 0 }
     }
 
     # 查找 Python
     $pythonExe = Find-Python
     if (-not $pythonExe) {
         Write-Log "未找到 Python 3，请安装 Python 3 并加入 PATH" "ERROR"
-        return $false
+        return @{ Success = $false; TimedOut = $false; BrowserPid = 0 }
     }
 
     # 启动回调服务器
@@ -194,7 +195,7 @@ function Invoke-AccountTask {
 
     if ($serverProcess.HasExited) {
         Write-Log "回调服务器启动失败（端口 $Port 可能被占用）" "ERROR"
-        return $false
+        return @{ Success = $false; TimedOut = $false; BrowserPid = 0 }
     }
     Write-Log "回调服务器已启动 (端口: $Port, PID: $($serverProcess.Id))"
 
@@ -210,24 +211,59 @@ function Invoke-AccountTask {
     $exitCode = $serverProcess.ExitCode
 
     if ($exitCode -eq 0) {
-        Write-Log "账号 $Name 任务完成" "SUCCESS"
-    } else {
-        Write-Log "账号 $Name 超时或失败 (退出码: $exitCode)" "ERROR"
-    }
-
-    # 关闭浏览器
-    Write-Log "正在关闭浏览器..."
-    try {
-        Stop-Process -Id $browserProcess.Id -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 3
-        if (-not $browserProcess.HasExited) {
-            Stop-Process -Id $browserProcess.Id -Force -ErrorAction SilentlyContinue
+        Write-Log "账号 $Name 任务完成，关闭浏览器" "SUCCESS"
+        try {
+            Stop-Process -Id $browserProcess.Id -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            if (-not $browserProcess.HasExited) {
+                Stop-Process -Id $browserProcess.Id -Force -ErrorAction SilentlyContinue
+            }
+        } catch {
+            Write-Log "浏览器可能已自行关闭" "WARN"
         }
-    } catch {
-        Write-Log "浏览器可能已自行关闭" "WARN"
+        return @{ Success = $true; TimedOut = $false; BrowserPid = 0 }
+    } else {
+        Write-Log "账号 $Name 回调超时，保留浏览器继续等待" "WARN"
+        return @{ Success = $false; TimedOut = $true; BrowserPid = $browserProcess.Id }
+    }
+}
+
+# ==================== 仅等待回调（浏览器已在运行）====================
+# 返回 hashtable: { Success=$bool; TimedOut=$bool }
+function Invoke-WaitForCallback {
+    param(
+        [string]$Name,
+        [int]$Port,
+        [int]$Timeout
+    )
+
+    $pythonExe = Find-Python
+    if (-not $pythonExe) {
+        Write-Log "未找到 Python 3" "ERROR"
+        return @{ Success = $false; TimedOut = $false }
     }
 
-    return ($exitCode -eq 0)
+    $serverScript  = Join-Path $ScriptDir "callback_server.py"
+    $serverProcess = Start-Process -FilePath $pythonExe `
+        -ArgumentList @($serverScript, $Port, $Timeout) `
+        -PassThru -NoNewWindow -RedirectStandardError "NUL"
+    Start-Sleep -Seconds 1
+
+    if ($serverProcess.HasExited) {
+        Write-Log "回调服务器启动失败（端口 $Port 可能被占用）" "ERROR"
+        return @{ Success = $false; TimedOut = $false }
+    }
+    Write-Log "回调服务器已重启，等待账号 $Name 重新通知 (超时: ${Timeout}秒)..."
+
+    $serverProcess | Wait-Process -ErrorAction SilentlyContinue
+    $exitCode = $serverProcess.ExitCode
+
+    if ($exitCode -eq 0) {
+        return @{ Success = $true; TimedOut = $false }
+    } else {
+        Write-Log "账号 $Name 再次超时" "WARN"
+        return @{ Success = $false; TimedOut = $true }
+    }
 }
 
 # ==================== 主流程 ====================
@@ -258,8 +294,10 @@ function Main {
         Write-Log " 开始执行 $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
         Write-Log "═══════════════════════════════════════"
 
-        $success = 0
-        $fail    = 0
+        $success     = 0
+        $fail        = 0
+        $timedOutAt  = @{}
+        $timedOutPids= @{}
 
         for ($i = 0; $i -lt $config.accounts.Count; $i++) {
             $acct    = $config.accounts[$i]
@@ -279,11 +317,41 @@ function Main {
                 -Url          $config.target_url `
                 -BrowserPaths $config.browser_paths
 
-            if ($result) { $success++ } else { $fail++ }
+            if ($result.Success) { $success++ } else { $fail++ }
+
+            # 超时时浏览器仍在运行，记录以便后续重试
+            if ($result.TimedOut) {
+                $timedOutPids[$i] = $result.BrowserPid
+                $timedOutAt[$i]   = Get-Date
+            }
 
             if ($i -lt ($config.accounts.Count - 1)) {
                 Write-Log "等待 5 秒后处理下一个账号..."
                 Start-Sleep -Seconds 5
+            }
+        }
+
+        # 等待所有超时账号重试完成
+        $retryWaitMinutes = if ($config.retry_wait_minutes) { [int]$config.retry_wait_minutes } else { 25 }
+        if ($timedOutAt.Count -gt 0) {
+            Write-Log "有 $($timedOutAt.Count) 个账号超时，等待 ${retryWaitMinutes} 分钟后重试..."
+            Start-Sleep -Seconds ($retryWaitMinutes * 60)
+            foreach ($idx in @($timedOutAt.Keys)) {
+                $acct = $config.accounts[$idx]
+                Write-Log "重试账号: $($acct.name)"
+                $retryResult = Invoke-WaitForCallback `
+                    -Name    $acct.name `
+                    -Port    $config.callback_port `
+                    -Timeout $config.timeout_seconds
+                if ($retryResult.Success) {
+                    Write-Log "账号 $($acct.name) 重试成功" "SUCCESS"
+                    $success++; $fail--
+                } else {
+                    Write-Log "账号 $($acct.name) 重试仍超时或失败" "ERROR"
+                }
+                # 无论结果，关闭对应浏览器
+                $pid = $timedOutPids[$idx]
+                try { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue } catch {}
             }
         }
 
@@ -294,7 +362,10 @@ function Main {
     }
     else {
         # ---- daemon 模式：按每个账号的 send_time 分别调度 ----
-        $executedToday = @{}
+        $executedToday  = @{}   # 已完成（成功或放弃）的账号索引
+        $timedOutAt     = @{}   # 超时的账号索引 -> 超时时间
+        $timedOutPids   = @{}   # 超时的账号索引 -> 浏览器 PID
+        $retryWaitMinutes = if ($config.retry_wait_minutes) { [int]$config.retry_wait_minutes } else { 25 }
         $currentDay = (Get-Date).ToString("yyyyMMdd")
 
         while ($true) {
@@ -302,11 +373,51 @@ function Main {
             $today = (Get-Date).ToString("yyyyMMdd")
             if ($today -ne $currentDay) {
                 Write-Log "新的一天，重置执行记录"
-                $executedToday = @{}
+                # 杀掉所有仍在等待的超时浏览器
+                foreach ($pid in $timedOutPids.Values) {
+                    try { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue } catch {}
+                }
+                $executedToday  = @{}
+                $timedOutAt     = @{}
+                $timedOutPids   = @{}
                 $currentDay = $today
             }
 
-            # 找到下一个需要执行的账号
+            # ---- 检查超时账号是否已到重试时间 ----
+            foreach ($idx in @($timedOutAt.Keys)) {
+                $elapsedMin = ((Get-Date) - $timedOutAt[$idx]).TotalMinutes
+                if ($elapsedMin -lt $retryWaitMinutes) { continue }
+
+                $acct = $config.accounts[$idx]
+                Write-Log ""
+                Write-Log "═══════════════════════════════════════"
+                Write-Log " 重试超时账号: $($acct.name) @ $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+                Write-Log "═══════════════════════════════════════"
+
+                $retryResult = Invoke-WaitForCallback `
+                    -Name    $acct.name `
+                    -Port    $config.callback_port `
+                    -Timeout $config.timeout_seconds
+
+                if ($retryResult.Success) {
+                    Write-Log "账号 $($acct.name) 重试成功，关闭浏览器" "SUCCESS"
+                    try { Stop-Process -Id $timedOutPids[$idx] -Force -ErrorAction SilentlyContinue } catch {}
+                    $executedToday[$idx] = $true
+                    $timedOutAt.Remove($idx)
+                    $timedOutPids.Remove($idx)
+                } elseif ($retryResult.TimedOut) {
+                    Write-Log "账号 $($acct.name) 重试仍超时，继续等待 ${retryWaitMinutes} 分钟" "WARN"
+                    $timedOutAt[$idx] = Get-Date   # 重置计时
+                } else {
+                    Write-Log "账号 $($acct.name) 重试失败，关闭浏览器" "ERROR"
+                    try { Stop-Process -Id $timedOutPids[$idx] -Force -ErrorAction SilentlyContinue } catch {}
+                    $executedToday[$idx] = $true
+                    $timedOutAt.Remove($idx)
+                    $timedOutPids.Remove($idx)
+                }
+            }
+
+            # ---- 找到下一个需要执行的账号（跳过已完成和超时等待中的） ----
             $nextIndex   = -1
             $nextSeconds = 999999
             $nextTimeStr = ""
@@ -315,6 +426,7 @@ function Main {
                 $acct = $config.accounts[$i]
                 if (-not $acct.enabled) { continue }
                 if ($executedToday.ContainsKey($i)) { continue }
+                if ($timedOutAt.ContainsKey($i)) { continue }   # 超时等待中，跳过
 
                 $acctTime = if ($acct.send_time) { $acct.send_time } else { $defaultSendTime }
 
@@ -335,6 +447,11 @@ function Main {
             }
 
             if ($nextIndex -eq -1) {
+                if ($timedOutAt.Count -gt 0) {
+                    # 仍有超时账号在等待，短暂休眠后继续轮询
+                    Start-Sleep -Seconds 60
+                    continue
+                }
                 Write-Log "今日所有账号已执行完毕，等待至明天..."
                 $tomorrow = (Get-Date).Date.AddDays(1).AddSeconds(1)
                 $sleepSecs = [int]($tomorrow - (Get-Date)).TotalSeconds
@@ -364,13 +481,18 @@ function Main {
                 -Url          $config.target_url `
                 -BrowserPaths $config.browser_paths
 
-            if ($result) {
+            if ($result.Success) {
                 Write-Log "账号 $($acct.name) 完成" "SUCCESS"
+                $executedToday[$nextIndex] = $true
+            } elseif ($result.TimedOut) {
+                Write-Log "账号 $($acct.name) 超时，保留浏览器，${retryWaitMinutes} 分钟后重试" "WARN"
+                $timedOutAt[$nextIndex]   = Get-Date
+                $timedOutPids[$nextIndex] = $result.BrowserPid
+                # 不标记 executedToday，由重试逻辑处理
             } else {
-                Write-Log "账号 $($acct.name) 失败" "ERROR"
+                Write-Log "账号 $($acct.name) 失败（非超时）" "ERROR"
+                $executedToday[$nextIndex] = $true
             }
-
-            $executedToday[$nextIndex] = $true
 
             Start-Sleep -Seconds 5
         }

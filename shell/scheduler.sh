@@ -154,6 +154,7 @@ print('yes' if now >= target else 'no')
 }
 
 # ---- 处理单个账号 ----
+# 输出格式：第一行 "SUCCESS" / "TIMEDOUT" / "FAIL"，超时时第二行为浏览器 PID
 process_account() {
     local name="$1" profile="$2" browser="$3" port="$4" timeout="$5" url="$6"
 
@@ -173,12 +174,13 @@ process_account() {
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then
         log_error "回调服务器启动失败（端口 ${port} 可能被占用）"
         SERVER_PID=""
-        return 1
+        echo "FAIL"
+        return
     fi
     log "回调服务器已启动 (端口: ${port}, PID: ${SERVER_PID})"
 
     # 启动浏览器
-    launch_browser "$browser" "$profile" "$url" || { kill "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""; return 1; }
+    launch_browser "$browser" "$profile" "$url" || { kill "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""; echo "FAIL"; return; }
     local pid="$BROWSER_PID"
     log "浏览器已启动 (PID: ${pid})"
     log "等待浏览器执行脚本完成 (超时: ${timeout}秒)..."
@@ -189,22 +191,47 @@ process_account() {
     SERVER_PID=""
 
     if [[ "$result" -eq 0 ]]; then
-        log_success "账号 ${name} 任务完成"
+        log_success "账号 ${name} 任务完成，关闭浏览器"
+        kill "$pid" 2>/dev/null || true
+        sleep 2
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+        BROWSER_PID=""
+        echo "SUCCESS"
     else
-        log_error "账号 ${name} 超时或失败 (退出码: ${result})"
+        log_warn "账号 ${name} 回调超时，保留浏览器继续等待"
+        BROWSER_PID=""
+        echo "TIMEDOUT"
+        echo "$pid"
     fi
+}
 
-    # 关闭浏览器
-    log "正在关闭浏览器 (PID: ${pid})..."
-    kill "$pid" 2>/dev/null || true
-    sleep 3
-    if kill -0 "$pid" 2>/dev/null; then
-        log_warn "浏览器未正常关闭，强制终止"
-        kill -9 "$pid" 2>/dev/null || true
+# ---- 仅等待回调（浏览器已在运行）----
+# 输出格式：第一行 "SUCCESS" / "TIMEDOUT" / "FAIL"
+wait_for_callback() {
+    local name="$1" port="$2" timeout="$3"
+
+    python3 "${SCRIPT_DIR}/callback_server.py" "$port" "$timeout" &
+    SERVER_PID=$!
+    sleep 1
+
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        log_error "回调服务器启动失败（端口 ${port} 可能被占用）"
+        SERVER_PID=""
+        echo "FAIL"
+        return
     fi
-    BROWSER_PID=""
+    log "回调服务器已重启，等待账号 ${name} 重新通知 (超时: ${timeout}秒)..."
 
-    return "$result"
+    local result=0
+    wait "$SERVER_PID" 2>/dev/null || result=$?
+    SERVER_PID=""
+
+    if [[ "$result" -eq 0 ]]; then
+        echo "SUCCESS"
+    else
+        log_warn "账号 ${name} 再次超时"
+        echo "TIMEDOUT"
+    fi
 }
 
 # ============================================================
@@ -248,6 +275,9 @@ main() {
         log "  ${acct_name}: 发送时间 ${acct_time}"
     done
 
+    local retry_wait_minutes
+    retry_wait_minutes=$(cfg '.retry_wait_minutes // 25')
+
     if [[ "$mode" != "daemon" ]]; then
         # ---- once 模式：立即执行所有已启用账号 ----
         log ""
@@ -256,6 +286,9 @@ main() {
         log "═══════════════════════════════════════"
 
         local success=0 fail=0
+        local -a timedout_indices timedout_pids timedout_ats
+        timedout_indices=(); timedout_pids=(); timedout_ats=()
+
         for ((i = 0; i < account_count; i++)); do
             local name profile browser enabled
             name=$(cfg ".accounts[$i].name")
@@ -270,8 +303,17 @@ main() {
                 continue
             fi
 
-            if process_account "$name" "$profile" "$browser" "$port" "$timeout" "$url"; then
+            local out
+            out=$(process_account "$name" "$profile" "$browser" "$port" "$timeout" "$url")
+            local status; status=$(echo "$out" | head -1)
+
+            if [[ "$status" == "SUCCESS" ]]; then
                 ((success++)) || true
+            elif [[ "$status" == "TIMEDOUT" ]]; then
+                local bpid; bpid=$(echo "$out" | sed -n '2p')
+                timedout_indices+=("$i")
+                timedout_pids+=("$bpid")
+                timedout_ats+=("$(date +%s)")
             else
                 ((fail++)) || true
             fi
@@ -282,64 +324,115 @@ main() {
             fi
         done
 
+        # 等待所有超时账号重试
+        if [[ ${#timedout_indices[@]} -gt 0 ]]; then
+            log "有 ${#timedout_indices[@]} 个账号超时，等待 ${retry_wait_minutes} 分钟后重试..."
+            sleep $((retry_wait_minutes * 60))
+            for j in "${!timedout_indices[@]}"; do
+                local idx="${timedout_indices[$j]}"
+                local bpid="${timedout_pids[$j]}"
+                local rname; rname=$(cfg ".accounts[$idx].name")
+                log "重试账号: ${rname}"
+                local rout; rout=$(wait_for_callback "$rname" "$port" "$timeout")
+                if [[ "$rout" == "SUCCESS" ]]; then
+                    log_success "账号 ${rname} 重试成功"
+                    ((success++)) || true
+                else
+                    log_error "账号 ${rname} 重试仍超时或失败"
+                    ((fail++)) || true
+                fi
+                kill "$bpid" 2>/dev/null || true
+                sleep 1; kill -9 "$bpid" 2>/dev/null || true
+            done
+        fi
+
         log ""
         log "═══════════════════════════════════════"
         log " 任务完成: 成功=${success}  失败=${fail}"
         log "═══════════════════════════════════════"
     else
         # ---- daemon 模式：按每个账号的 send_time 分别调度 ----
-        # 跟踪今天已执行的账号索引
-        local -A executed_today
+        local -A executed_today timed_out_at timed_out_pid
         local current_day
         current_day=$(date +%Y%m%d)
 
         while true; do
-            # 日期变更时重置已执行记录
             local today
             today=$(date +%Y%m%d)
             if [[ "$today" != "$current_day" ]]; then
                 log "新的一天，重置执行记录"
-                executed_today=()
+                # 关闭所有仍在等待的超时浏览器
+                for pid_val in "${timed_out_pid[@]}"; do
+                    kill "$pid_val" 2>/dev/null || true
+                done
+                executed_today=(); timed_out_at=(); timed_out_pid=()
                 current_day="$today"
             fi
 
-            # 找到下一个需要执行的账号（最近的发送时间）
-            local next_index=-1
-            local next_seconds=999999
-            local next_time_str=""
+            # ---- 检查超时账号是否到了重试时间 ----
+            for idx in "${!timed_out_at[@]}"; do
+                local elapsed_min
+                elapsed_min=$(python3 -c "import time; print(int((time.time() - ${timed_out_at[$idx]}) / 60))")
+                [[ "$elapsed_min" -lt "$retry_wait_minutes" ]] && continue
+
+                local rname; rname=$(cfg ".accounts[$idx].name")
+                log ""
+                log "═══════════════════════════════════════"
+                log " 重试超时账号: ${rname} @ $(date '+%Y-%m-%d %H:%M:%S')"
+                log "═══════════════════════════════════════"
+
+                local rout; rout=$(wait_for_callback "$rname" "$port" "$timeout")
+                local bpid="${timed_out_pid[$idx]}"
+
+                if [[ "$rout" == "SUCCESS" ]]; then
+                    log_success "账号 ${rname} 重试成功，关闭浏览器"
+                    kill "$bpid" 2>/dev/null || true; sleep 1; kill -9 "$bpid" 2>/dev/null || true
+                    executed_today[$idx]=1
+                    unset 'timed_out_at[$idx]'
+                    unset 'timed_out_pid[$idx]'
+                elif [[ "$rout" == "TIMEDOUT" ]]; then
+                    log_warn "账号 ${rname} 重试仍超时，继续等待 ${retry_wait_minutes} 分钟"
+                    timed_out_at[$idx]=$(date +%s)
+                else
+                    log_error "账号 ${rname} 重试失败，关闭浏览器"
+                    kill "$bpid" 2>/dev/null || true; sleep 1; kill -9 "$bpid" 2>/dev/null || true
+                    executed_today[$idx]=1
+                    unset 'timed_out_at[$idx]'
+                    unset 'timed_out_pid[$idx]'
+                fi
+            done
+
+            # ---- 找到下一个需要执行的账号（跳过已完成和超时等待中的） ----
+            local next_index=-1 next_seconds=999999 next_time_str=""
 
             for ((i = 0; i < account_count; i++)); do
                 local enabled acct_time
                 enabled=$(cfg ".accounts[$i].enabled")
                 [[ "$enabled" != "true" ]] && continue
                 [[ -n "${executed_today[$i]+x}" ]] && continue
+                [[ -n "${timed_out_at[$i]+x}" ]] && continue   # 超时等待中，跳过
 
                 acct_time=$(cfg ".accounts[$i].send_time // empty")
                 [[ -z "$acct_time" || "$acct_time" == "null" ]] && acct_time="$default_send_time"
 
-                # 检查该时间今天是否已过
-                local past
-                past=$(is_time_past_today "$acct_time")
+                local past; past=$(is_time_past_today "$acct_time")
                 if [[ "$past" == "yes" ]]; then
-                    # 时间已过且未执行 → 立即执行
-                    next_index=$i
-                    next_seconds=0
-                    next_time_str="$acct_time"
+                    next_index=$i; next_seconds=0; next_time_str="$acct_time"
                     break
                 fi
 
-                local secs
-                secs=$(seconds_until "$acct_time")
+                local secs; secs=$(seconds_until "$acct_time")
                 if [[ "$secs" -lt "$next_seconds" ]]; then
-                    next_seconds=$secs
-                    next_index=$i
-                    next_time_str="$acct_time"
+                    next_seconds=$secs; next_index=$i; next_time_str="$acct_time"
                 fi
             done
 
             if [[ "$next_index" -eq -1 ]]; then
+                if [[ ${#timed_out_at[@]} -gt 0 ]]; then
+                    sleep 60   # 还有超时账号在等待，每分钟轮询一次
+                    continue
+                fi
                 log "今日所有账号已执行完毕，等待至明天..."
-                # 睡眠到明天 00:00:01
                 local sleep_secs
                 sleep_secs=$(python3 -c "
 import datetime
@@ -367,15 +460,22 @@ print(int((tomorrow - now).total_seconds()))
             log " 执行账号: ${name} @ $(date '+%Y-%m-%d %H:%M:%S')"
             log "═══════════════════════════════════════"
 
-            if process_account "$name" "$profile" "$browser" "$port" "$timeout" "$url"; then
+            local out; out=$(process_account "$name" "$profile" "$browser" "$port" "$timeout" "$url")
+            local status; status=$(echo "$out" | head -1)
+
+            if [[ "$status" == "SUCCESS" ]]; then
                 log_success "账号 ${name} 完成"
+                executed_today[$next_index]=1
+            elif [[ "$status" == "TIMEDOUT" ]]; then
+                local bpid; bpid=$(echo "$out" | sed -n '2p')
+                log_warn "账号 ${name} 超时，保留浏览器，${retry_wait_minutes} 分钟后重试"
+                timed_out_at[$next_index]=$(date +%s)
+                timed_out_pid[$next_index]="$bpid"
             else
-                log_error "账号 ${name} 失败"
+                log_error "账号 ${name} 失败（非超时）"
+                executed_today[$next_index]=1
             fi
 
-            executed_today[$next_index]=1
-
-            # 短暂间隔后继续检查下一个
             sleep 5
         done
     fi

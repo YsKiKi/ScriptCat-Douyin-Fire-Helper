@@ -2,6 +2,7 @@
     "send_time": "00:01:00",
     "callback_port": 7788,
     "timeout_seconds": 300,
+    "retry_wait_minutes": 25,
     "default_browser": "firefox",
     "browser_paths": {
         "firefox": "",
