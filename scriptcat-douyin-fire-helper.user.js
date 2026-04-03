@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音续火花自动发送助手-支持多用户-多功能
 // @namespace    http://tampermonkey.net/
-// @version      2.0.4
+// @version      2.0.5
 // @description  每天自动发送续火消息，支持自定义时间，集成一言API和TXTAPI，支持多目标用户，记录火花天数，专属一言，随机发送时间，用户列表解析，自动重试，自动切换全部标签页，精简日志
 // @author       飔梦 / 阚泥 / xiaohe123awa / YsKiKi
 // @match        https://creator.douyin.com/creator-micro/data/following/chat
@@ -335,7 +335,7 @@
 			// 可能的选择器（优先新UI，兼容旧UI）
 			const tabSelectors = [
 				'.semi-tabs-tab',               // 新样式
-				'.sub-tab-item-yeJmWL'          // 旧样式
+				'[class*="sub-tab-item-"]'       // 旧样式
 			];
 			let allTab = null;
 			for (const selector of tabSelectors) {
@@ -946,7 +946,7 @@
 		stopChatObserver('开始滚动查找', true);
 
 		const ITEM_SEL = '[class*="item-header-name-"]';
-		const NO_MORE_SEL = '.no-more-tip-ftdJnu';
+		const NO_MORE_SEL = '[class*="no-more-tip-"]';
 
 		// 查找可滚动的聊天列表容器
 		let container = null;
@@ -2103,7 +2103,7 @@
 	// onDone() — 滚动结束
 	function autoScrollChatListAndCollect(panelEl, onNewItems, onDone) {
 		const ITEM_SEL = '[class*="item-header-name-"]';
-		const NO_MORE_SEL = '.no-more-tip-ftdJnu';
+		const NO_MORE_SEL = '[class*="no-more-tip-"]';
 		const seen = new Set();
 
 		// 扫描当前 DOM，返回本次新增的昵称数组
