@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音续火花自动发送助手-支持多用户-多功能
 // @namespace    http://tampermonkey.net/
-// @version      2.0.3
+// @version      2.0.4
 // @description  每天自动发送续火消息，支持自定义时间，集成一言API和TXTAPI，支持多目标用户，记录火花天数，专属一言，随机发送时间，用户列表解析，自动重试，自动切换全部标签页，精简日志
 // @author       飔梦 / 阚泥 / xiaohe123awa / YsKiKi
 // @match        https://creator.douyin.com/creator-micro/data/following/chat
@@ -1135,7 +1135,7 @@
 			const checkInterval = setInterval(() => {
 				checkCount++;
 
-				const chatInput = document.querySelector('.chat-input-dccKiL');
+				const chatInput = document.querySelector('[class*="chat-input-"]');
 				if (chatInput) {
 					settle(resolve);
 					return;
@@ -1344,7 +1344,7 @@
 			clearTimeout(chatInputCheckTimer);
 		}
 
-		const input = document.querySelector('.chat-input-dccKiL');
+		const input = document.querySelector('[class*="chat-input-"]');
 		if (input) {
 			chatInputNotFoundCount = 0;
 			addHistoryLog('找到聊天输入框', 'info');
