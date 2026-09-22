@@ -1786,8 +1786,90 @@
 		return isEmpty();
 	}
 
+	// 输入框里的每一行（该编辑器用 .ace-line 分行）
+	function readEditorLines(editor) {
+		const lineNodes = editor.querySelectorAll('.ace-line');
+		const sources = lineNodes.length > 0 ? Array.from(lineNodes) : [editor];
+		return sources.map(node => node.textContent.replace(/\u200b/g, '').trim());
+	}
+
+	// 目标消息的每一行（仅去掉末尾空行，保留开头空行以便发现多余空行）
+	function getMessageLines(message) {
+		const lines = String(message).replace(/\u200b/g, '').split('\n').map(line => line.trim());
+		while (lines.length > 1 && lines[lines.length - 1] === '') {
+			lines.pop();
+		}
+		return lines;
+	}
+
+	// 输入框内容与目标消息是否逐行一致
+	function isEditorContentEqual(editor, message) {
+		const expected = getMessageLines(message);
+		const actual = readEditorLines(editor);
+		if (expected.length !== actual.length) {
+			return false;
+		}
+		return expected.every((line, index) => line === actual[index]);
+	}
+
+	// 按编辑器自身的行结构直接构建多行内容
+	function buildLinesInSlateEditor(editor, message) {
+		try {
+			const fragment = document.createDocumentFragment();
+			for (const line of String(message).split('\n')) {
+				const lineEl = document.createElement('div');
+				lineEl.className = 'ace-line';
+				lineEl.setAttribute('data-node', 'true');
+				lineEl.setAttribute('dir', 'auto');
+
+				const span = document.createElement('span');
+				span.setAttribute('data-string', 'true');
+				span.setAttribute('data-leaf', 'true');
+				span.textContent = line.trim() || '\u200b';
+				lineEl.appendChild(span);
+				fragment.appendChild(lineEl);
+			}
+
+			while (editor.firstChild) {
+				editor.removeChild(editor.firstChild);
+			}
+			editor.appendChild(fragment);
+			editor.dispatchEvent(new InputEvent('input', {
+				bubbles: true,
+				cancelable: true,
+				inputType: 'insertText',
+				data: String(message)
+			}));
+			return true;
+		} catch (error) {
+			addHistoryLog(`直接构建输入内容失败: ${error.message}`, 'warn');
+			return false;
+		}
+	}
+
+	// 当前浏览器能否构造带数据的 paste 事件（Firefox 构造出的 clipboardData 为空）
+	let pasteSimulationSupported = null;
+	function canSimulatePaste() {
+		if (pasteSimulationSupported !== null) {
+			return pasteSimulationSupported;
+		}
+		try {
+			const dataTransfer = new DataTransfer();
+			dataTransfer.setData('text/plain', 'probe');
+			const event = new ClipboardEvent('paste', { clipboardData: dataTransfer });
+			pasteSimulationSupported = !!(event.clipboardData && event.clipboardData.getData('text/plain') === 'probe');
+		} catch (error) {
+			pasteSimulationSupported = false;
+		}
+		return pasteSimulationSupported;
+	}
+
 	// 整段粘贴写入（该编辑器原生处理粘贴文本里的换行）
 	async function pasteTextToSlateEditor(editor, message) {
+		if (!canSimulatePaste()) {
+			return false;
+		}
+
 		try {
 			const dataTransfer = new DataTransfer();
 			dataTransfer.setData('text/plain', message);
@@ -1798,12 +1880,11 @@
 			}));
 			await sleep(600);
 
-			const expected = String(message).replace(/\u200b/g, '').replace(/\s+/g, '');
-			const actual = editor.textContent.replace(/\u200b/g, '').replace(/\s+/g, '');
-			if (expected.length > 0 && actual === expected) {
+			if (isEditorContentEqual(editor, message)) {
 				return true;
 			}
-			addHistoryLog(`粘贴写入结果与预期不一致（预期 ${expected.length} 字，实际 ${actual.length} 字）`, 'warn');
+			const actual = readEditorLines(editor);
+			addHistoryLog(`粘贴写入结果与预期不符（预期 ${getMessageLines(message).length} 行，实际 ${actual.length} 行）`, 'warn');
 			return false;
 		} catch (error) {
 			addHistoryLog(`粘贴写入失败: ${error.message}`, 'warn');
@@ -1867,8 +1948,12 @@
 			return false;
 		}
 
-		if (await pasteTextToSlateEditor(editor, message)) {
+		if (canSimulatePaste() && await pasteTextToSlateEditor(editor, message)) {
 			return true;
+		}
+
+		if (!canSimulatePaste()) {
+			addHistoryLog('当前浏览器不支持构造粘贴事件，按行构建输入内容', 'info');
 		}
 
 		if (!await clearSlateEditor(editor)) {
@@ -1876,16 +1961,29 @@
 			return false;
 		}
 
-		const singleLine = String(message).split('\n').map(line => line.trim()).filter(Boolean).join(' ');
-		addHistoryLog('粘贴写入不可用，改用单行逐字符写入', 'warn');
-		if (!await typeTextToSlateEditor(editor, singleLine)) {
+		if (buildLinesInSlateEditor(editor, message)) {
+			await sleep(200);
+			if (isEditorContentEqual(editor, message)) {
+				addHistoryLog('粘贴不可用，已按行构建输入内容', 'warn');
+				return true;
+			}
+			addHistoryLog('按行构建后的内容与预期不符，改为逐字符写入', 'warn');
+		}
+
+		const lines = getMessageLines(message);
+		if (lines.length > 1) {
+			addHistoryLog('多行内容写入失败，取消本次发送以免丢失换行', 'error');
 			return false;
 		}
 
-		const expected = singleLine.replace(/\s+/g, '');
-		const actual = editor.textContent.replace(/\u200b/g, '').replace(/\s+/g, '');
-		if (expected !== actual) {
-			addHistoryLog('逐字符写入结果与预期不符，取消本次发送', 'error');
+		const singleLine = lines[0] || '';
+		if (!await clearSlateEditor(editor)) {
+			addHistoryLog('输入框清空失败，取消本次发送以避免发出脏内容', 'error');
+			return false;
+		}
+
+		if (!await typeTextToSlateEditor(editor, singleLine) || !isEditorContentEqual(editor, singleLine)) {
+			addHistoryLog('写入结果与预期不符，取消本次发送', 'error');
 			return false;
 		}
 
@@ -2066,16 +2164,26 @@
 	// 把消息写入输入框
 	function writeMessageToComposer(input, message) {
 		input.textContent = '';
-		input.innerHTML = message.split('\n').map(line => {
-			const escaped = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-			return escaped || '<br>';
-		}).join('<br>');
+		input.innerHTML = message.split('\n').map(line =>
+			line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')).join('<br>');
 		input.dispatchEvent(new InputEvent('input', {
 			bubbles: true,
 			cancelable: true,
 			inputType: 'insertText',
 			data: message
 		}));
+
+		const expected = message.split('\n').map(line => line.trim());
+		while (expected.length > 1 && expected[expected.length - 1] === '') {
+			expected.pop();
+		}
+		const actual = String(input.innerText || input.textContent).replace(/\u200b/g, '').split('\n').map(line => line.trim());
+		while (actual.length > 1 && actual[actual.length - 1] === '') {
+			actual.pop();
+		}
+		if (expected.length !== actual.length) {
+			addHistoryLog(`输入框换行与预期不符（预期 ${expected.length} 行，实际 ${actual.length} 行），本条消息可能连成一行`, 'warn');
+		}
 
 		return input.textContent.replace(/\u200b/g, '').trim().length > 0;
 	}
