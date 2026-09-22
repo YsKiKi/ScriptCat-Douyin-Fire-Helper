@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音续火花自动发送助手-支持多用户-多功能
 // @namespace    http://tampermonkey.net/
-// @version      2.0.7
+// @version      2.0.8
 // @description  每天自动发送续火消息，支持自定义时间，集成一言API和TXTAPI，支持多目标用户，记录火花天数，专属一言，随机发送时间，用户列表解析，自动重试，自动切换全部标签页，精简日志
 // @author       飔梦 / 阚泥 / xiaohe123awa / YsKiKi
 // @match        https://creator.douyin.com/creator-micro/data/following/chat
@@ -4567,7 +4567,7 @@
 
 		return Object.assign({
 			timestamp: Date.now(),
-			version: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2.0.7',
+			version: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2.0.8',
 			surface: getPageType(),
 			final: true,
 			mode: targetMode ? 'multi' : 'single',
