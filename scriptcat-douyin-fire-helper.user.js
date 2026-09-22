@@ -1285,7 +1285,7 @@
 		GM_setValue('isMaxRetryReached', false);
 
 		if (userConfig.enableTargetUser && allTargetUsers.length > 0) {
-			const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user) && !failedUsersToday.includes(user));
+			const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user));
 			if (unsentUsers.length === 0) {
 				addHistoryLog('所有目标用户今日都已发送', 'info');
 				return;
@@ -2185,7 +2185,7 @@
 		updateRetryCount();
 
 		if (userConfig.enableTargetUser && allTargetUsers.length > 0) {
-			const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user) && !failedUsersToday.includes(user));
+			const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user));
 			if (unsentUsers.length > 0) {
 				addHistoryLog(`还有 ${unsentUsers.length} 个用户待发送，继续下一个用户`, 'info');
 				setTimeout(sendMessage, 2000);
@@ -2691,7 +2691,7 @@
 						resetTodaySentUsers();
 					}
 
-					const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user) && !failedUsersToday.includes(user));
+					const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user));
 					if (unsentUsers.length > 0) {
 						if (!isProcessing) {
 							addHistoryLog('倒计时结束，开始发送给未发送的用户', 'info');
