@@ -197,6 +197,13 @@ process_account() {
         kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
         BROWSER_PID=""
         echo "SUCCESS"
+    elif [[ "$result" -eq 3 ]]; then
+        log_error "账号 ${name} 任务失败（脚本回报有用户未发送），关闭浏览器"
+        kill "$pid" 2>/dev/null || true
+        sleep 2
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+        BROWSER_PID=""
+        echo "FAIL"
     else
         log_warn "账号 ${name} 回调超时，保留浏览器继续等待"
         BROWSER_PID=""
@@ -228,6 +235,9 @@ wait_for_callback() {
 
     if [[ "$result" -eq 0 ]]; then
         echo "SUCCESS"
+    elif [[ "$result" -eq 3 ]]; then
+        log_error "账号 ${name} 再次回报失败（有用户未发送）"
+        echo "FAIL"
     else
         log_warn "账号 ${name} 再次超时"
         echo "TIMEDOUT"
@@ -286,8 +296,8 @@ main() {
         log "═══════════════════════════════════════"
 
         local success=0 fail=0
-        local -a timedout_indices timedout_pids timedout_ats
-        timedout_indices=(); timedout_pids=(); timedout_ats=()
+        local -a timedout_indices timedout_pids timedout_ats failed_indices
+        timedout_indices=(); timedout_pids=(); timedout_ats=(); failed_indices=()
 
         for ((i = 0; i < account_count; i++)); do
             local name profile browser enabled
@@ -316,6 +326,7 @@ main() {
                 timedout_ats+=("$(date +%s)")
             else
                 ((fail++)) || true
+                failed_indices+=("$i")
             fi
 
             if [[ $i -lt $((account_count - 1)) ]]; then
@@ -343,6 +354,29 @@ main() {
                 fi
                 kill "$bpid" 2>/dev/null || true
                 sleep 1; kill -9 "$bpid" 2>/dev/null || true
+            done
+        fi
+
+        # 等待并重跑脚本回报失败的账号（全新一轮，浏览器重新启动）
+        if [[ ${#failed_indices[@]} -gt 0 && "$retry_wait_minutes" -gt 0 ]]; then
+            log "有 ${#failed_indices[@]} 个账号回报失败，等待 ${retry_wait_minutes} 分钟后重跑..."
+            sleep $((retry_wait_minutes * 60))
+            for idx in "${failed_indices[@]}"; do
+                local rname rprofile rbrowser
+                rname=$(cfg ".accounts[$idx].name")
+                rprofile=$(cfg ".accounts[$idx].profile_path")
+                rbrowser=$(cfg ".accounts[$idx].browser // empty")
+                [[ -z "$rbrowser" || "$rbrowser" == "null" ]] && rbrowser="$default_browser"
+                log "重跑账号: ${rname}"
+                local rout
+                rout=$(process_account "$rname" "$rprofile" "$rbrowser" "$port" "$timeout" "$url" | head -1)
+                if [[ "$rout" == "SUCCESS" ]]; then
+                    log_success "账号 ${rname} 重跑成功"
+                    ((success++)) || true
+                    ((fail--)) || true
+                else
+                    log_error "账号 ${rname} 重跑仍失败"
+                fi
             done
         fi
 
