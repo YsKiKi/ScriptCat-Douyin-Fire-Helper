@@ -357,7 +357,7 @@ main() {
             done
         fi
 
-        # 等待并重跑脚本回报失败的账号（全新一轮，浏览器重新启动）
+        # 等待后重跑脚本回报失败的账号
         if [[ ${#failed_indices[@]} -gt 0 && "$retry_wait_minutes" -gt 0 ]]; then
             log "有 ${#failed_indices[@]} 个账号回报失败，等待 ${retry_wait_minutes} 分钟后重跑..."
             sleep $((retry_wait_minutes * 60))

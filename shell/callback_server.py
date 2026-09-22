@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 """
 抖音续火助手 - HTTP 回调监听服务器
-监听浏览器执行脚本 (UserScript) 发送的完成信号。
-
-用法: python3 callback_server.py [端口] [超时秒数]
-退出码: 0=任务成功 1=超时未收到回调 2=错误 3=任务失败(部分或全部)
-状态文件: 收到最终回调时写入同目录 last_callback.json，供调度脚本读取
 """
 
 import sys
@@ -18,7 +13,7 @@ STATE_FILE = Path(__file__).resolve().parent / 'last_callback.json'
 
 
 class CallbackHandler(BaseHTTPRequestHandler):
-    """处理浏览器执行脚本发送的 POST /done 回调请求"""
+    """处理 POST /done 回调，最终回调写入 last_callback.json"""
     result = None
 
     def do_POST(self):
@@ -34,7 +29,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, UnicodeDecodeError):
             payload = {'raw': body.decode('utf-8', errors='replace')}
 
-        # final=false 只是进度/重试通知，继续等待最终回调
+        # final=false 为非最终通知，继续等待
         is_final = payload.get('final', True) if isinstance(payload, dict) else True
         status = payload.get('status', 'unknown') if isinstance(payload, dict) else 'unknown'
 
@@ -53,7 +48,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
         self.wfile.write(b'{"status":"ok"}')
 
         if is_final:
-            # 在后台线程中关闭服务器，避免死锁
+            # 在后台线程中关闭服务器
             threading.Thread(target=self.server.shutdown, daemon=True).start()
 
     def log_message(self, format, *args):
@@ -72,6 +67,7 @@ def exit_code_for(payload):
 
 
 def main():
+    """按端口与超时监听回调，退出码: 0=成功 1=超时 2=错误 3=部分或全部失败"""
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 7788
     timeout = int(sys.argv[2]) if len(sys.argv) > 2 else 300
 

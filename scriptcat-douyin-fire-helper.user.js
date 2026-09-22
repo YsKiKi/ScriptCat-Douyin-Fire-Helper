@@ -137,7 +137,6 @@
 		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 	}
 
-	// 延时
 	function sleep(ms) {
 		return new Promise(resolve => setTimeout(resolve, ms));
 	}
@@ -442,7 +441,7 @@
 			userConfig.fireDays = GM_getValue('fireDays');
 		}
 
-		// 主站私信页名单（与创作者中心的昵称名单分开保存）
+		// 主站私信页名单
 		if (typeof userConfig.targetUsernamesChat !== 'string') {
 			userConfig.targetUsernamesChat = '';
 		}
@@ -509,7 +508,7 @@
 		return userConfig;
 	}
 
-	// 当前页面使用的目标用户名单键（两套界面的名字体系不同，分开放）
+	// 当前页面使用的目标用户名单键
 	function getTargetUsernamesKey() {
 		return getPageType() === 'chat' ? 'targetUsernamesChat' : 'targetUsernames';
 	}
@@ -769,7 +768,7 @@
 		if (perUser > 0) {
 			statusEl.textContent = perUser;
 		} else if (getPageType() === 'chat') {
-			// 主站私信页读不到真实天数时不拿全局值顶替
+			// 主站私信页取不到天数时留空
 			statusEl.textContent = '—';
 		} else {
 			statusEl.textContent = userConfig.fireDays;
@@ -777,7 +776,7 @@
 		statusEl.style.color = '#00d8b8';
 	}
 
-	// 更新火花天数（旧版界面无火花数字，按用户逐日自增）
+	// 更新火花天数，创作者中心按用户逐日自增
 	function updateFireDays(targetUser) {
 		const today = getLocalTodayString();
 
@@ -1524,7 +1523,6 @@
 
 	// ==================== 主站私信页（www.douyin.com/chat）支持 ====================
 
-	// 页面类型
 	function getPageType() {
 		if (location.hostname.includes('creator.douyin.com')) {
 			return 'creator';
@@ -1576,7 +1574,7 @@
 		}));
 	}
 
-	// 主站私信页读取火花天数（只取当前会话，忽略列表与隐藏面板里的数字）
+	// 主站私信页读取当前会话的火花天数
 	function readChatPageFireDays(username) {
 		const sparkEl = findCurrentChatSparkEl(username);
 		if (!sparkEl) {
@@ -1602,7 +1600,7 @@
 			return sparks[0];
 		}
 
-		// 头部容器里包含当前目标昵称，才算这个会话的火花
+		// 头部容器包含目标昵称才算当前会话的火花
 		for (const sparkEl of sparks) {
 			let node = sparkEl;
 			for (let level = 0; level < 6 && node; level++) {
@@ -1755,7 +1753,7 @@
 			return true;
 		}
 
-		// 兜底：直接重建一个空的编辑行，避免旧内容被一起发出
+		// 重建空的编辑行
 		try {
 			const emptyLine = document.createElement('div');
 			emptyLine.className = 'ace-line';
@@ -1786,14 +1784,14 @@
 		return isEmpty();
 	}
 
-	// 输入框里的每一行（该编辑器用 .ace-line 分行）
+	// 读取输入框内的每一行
 	function readEditorLines(editor) {
 		const lineNodes = editor.querySelectorAll('.ace-line');
 		const sources = lineNodes.length > 0 ? Array.from(lineNodes) : [editor];
 		return sources.map(node => node.textContent.replace(/\u200b/g, '').trim());
 	}
 
-	// 目标消息的每一行（仅去掉末尾空行，保留开头空行以便发现多余空行）
+	// 拆分目标消息的每一行，末尾空行不计入
 	function getMessageLines(message) {
 		const lines = String(message).replace(/\u200b/g, '').split('\n').map(line => line.trim());
 		while (lines.length > 1 && lines[lines.length - 1] === '') {
@@ -1847,7 +1845,7 @@
 		}
 	}
 
-	// 当前浏览器能否构造带数据的 paste 事件（Firefox 构造出的 clipboardData 为空）
+	// 当前浏览器能否构造带数据的粘贴事件
 	let pasteSimulationSupported = null;
 	function canSimulatePaste() {
 		if (pasteSimulationSupported !== null) {
@@ -1864,7 +1862,7 @@
 		return pasteSimulationSupported;
 	}
 
-	// 整段粘贴写入（该编辑器原生处理粘贴文本里的换行）
+	// 整段粘贴写入
 	async function pasteTextToSlateEditor(editor, message) {
 		if (!canSimulatePaste()) {
 			return false;
@@ -1892,8 +1890,7 @@
 		}
 	}
 
-	// 主站私信页写入消息（优先整段粘贴，失败再逐字符输入）
-	// 逐字符写入（该编辑器无法合成换行，只用于单行文本）
+	// 逐字符写入单行文本
 	async function typeTextToSlateEditor(editor, text) {
 		for (const char of String(text)) {
 			if (document.activeElement !== editor) {
@@ -1937,7 +1934,7 @@
 		return editor.textContent.replace(/\u200b/g, '').trim().length > 0;
 	}
 
-	// 主站私信页写入消息（先整段粘贴，失败再单行逐字符；结果不符就不发）
+	// 主站私信页写入消息，写入结果按行校验
 	async function writeMessageToSlateEditor(editor, message) {
 		if (!editor) {
 			return false;
@@ -2108,7 +2105,7 @@
 			chatInputNotFoundCount = 0;
 			addHistoryLog('找到聊天输入框', 'info');
 
-			// 以当前重试目标为准，避免并发查找把 lastTargetUser 推进到下一个人
+			// 取当前重试目标作为本次发送对象
 			const sendTargetUser = currentRetryUser || GM_getValue('lastTargetUser', '') || '';
 
 			let messageToSend;
@@ -2211,7 +2208,7 @@
 		return '';
 	}
 
-	// 取消息首行前若干字符，用于在会话预览里确认消息已发出
+	// 取消息首行前若干字符
 	function getMessageProbe(message) {
 		const firstLine = message.split('\n').find(line => line.trim()) || '';
 		return firstLine.trim().slice(0, 6);
@@ -2629,7 +2626,7 @@
 		const startMinutes = start.h * 60 + start.m;
 		const endMinutes = end.h * 60 + end.m;
 
-		// 起止相同即固定时间，而非覆盖全天
+		// 起止相同视为固定时间
 		if (startMinutes === endMinutes) {
 			const fixed = `${String(start.h).padStart(2, '0')}:${String(start.m).padStart(2, '0')}:${String(start.s).padStart(2, '0')}`;
 			return parseTimeString(fixed);
@@ -4509,7 +4506,7 @@
 			return;
 		}
 		// 全部处理完毕
-		// 只统计当前界面名单里的用户（两套界面的名字体系不同，共用一份记录）
+		// 只统计当前界面名单里的用户
 		const currentSentUsers = allTargetUsers.filter(u => sentUsersToday.includes(u));
 		const currentFailedUsers = allTargetUsers.filter(u => failedUsersToday.includes(u));
 		const successCount = currentSentUsers.length;
@@ -4534,7 +4531,7 @@
 		notifyScriptB({ mode: 'multi', status, sentCount: successCount, failCount });
 	}
 
-	// 组装回调数据（字段标准化，供调度器解析）
+	// 组装回调数据
 	function buildCallbackPayload(payload) {
 		const sentUsers = allTargetUsers.filter(user => sentUsersToday.includes(user));
 		const failedUsers = allTargetUsers.filter(user => failedUsersToday.includes(user));

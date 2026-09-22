@@ -1,4 +1,4 @@
-# 本地文件（.gitignore 自身也只在本地生效）
+# 本地文件
 .gitignore
 server.nowRun/
 
