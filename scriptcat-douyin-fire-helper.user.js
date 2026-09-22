@@ -5,6 +5,7 @@
 // @description  每天自动发送续火消息，支持自定义时间，集成一言API和TXTAPI，支持多目标用户，记录火花天数，专属一言，随机发送时间，用户列表解析，自动重试，自动切换全部标签页，精简日志
 // @author       飔梦 / 阚泥 / xiaohe123awa / YsKiKi
 // @match        https://creator.douyin.com/creator-micro/data/following/chat
+// @match        https://www.douyin.com/chat*
 // @icon         https://free.picui.cn/free/2025/11/23/69226264aca4e.png
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -47,6 +48,8 @@
 		txtApiManualText: "文本1\n文本2\n文本3",
 		enableTargetUser: false,
 		targetUsernames: "",
+		targetUsernamesChat: "",
+		sendPlatform: "auto",
 		userSearchTimeout: 10000,
 		maxHistoryLogs: 200,
 		searchDebounceDelay: 500,
@@ -128,6 +131,17 @@
 	// 拖拽全局监听器是否已绑定
 	let dragListenersAttached = false;
 
+	// 本地日期字符串（YYYY-MM-DD）
+	function getLocalTodayString() {
+		const d = new Date();
+		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+	}
+
+	// 延时
+	function sleep(ms) {
+		return new Promise(resolve => setTimeout(resolve, ms));
+	}
+
 	// 已完成通知是否已发送（防止 autoSendIfNeeded 每秒重复通知后端调度器）
 	let alreadyDoneNotified = false;
 
@@ -203,6 +217,12 @@
 
 	// 等待页面加载后查找输入框（消除重复的 waitForPageLoad+tryFindChatInput 链）
 	function waitForPageAndInput() {
+		if (getPageType() === 'chat') {
+			addHistoryLog('主站私信页：开始查找聊天输入框', 'info');
+			tryFindChatInputChat();
+			return;
+		}
+
 		waitForPageLoad().then(() => {
 			addHistoryLog('页面加载完成，开始查找聊天输入框', 'info');
 			tryFindChatInput();
@@ -223,7 +243,7 @@
 		GM_setValue('lastTargetUser', '');
 		GM_setValue('lastResetDate', '');
 		GM_setValue('fireDays', 1);
-		GM_setValue('lastFireDate', new Date().toISOString().split('T')[0]);
+		GM_setValue('lastFireDate', getLocalTodayString());
 		GM_setValue('specialHitokotoSentIndexes', specialHitokotoSentIndexes);
 		GM_setValue('retryCount', 0);
 		GM_setValue('isMaxRetryReached', false);
@@ -253,6 +273,8 @@
 
 	// 检测好友改名并自动更新 targetUsernames 和 nicknameUserIdMap
 	function detectAndUpdateRenamedUsers() {
+		// 只处理创作者中心的昵称名单
+		if (getPageType() !== 'creator') return;
 		if (!userConfig.targetUsernames) return;
 		const nicknameUserIdMap = GM_getValue('nicknameUserIdMap', {});
 		let updated = false;
@@ -355,8 +377,8 @@
 			}
 			// 检查是否已激活
 			const isActive = allTab.classList.contains('active') ||
-							 allTab.classList.contains('semi-tabs-tab-active') ||
-							 allTab.getAttribute('aria-selected') === 'true';
+				allTab.classList.contains('semi-tabs-tab-active') ||
+				allTab.getAttribute('aria-selected') === 'true';
 			if (isActive) {
 				resolve();
 				return;
@@ -420,9 +442,19 @@
 			userConfig.fireDays = GM_getValue('fireDays');
 		}
 
+		// 主站私信页名单（与创作者中心的昵称名单分开保存）
+		if (typeof userConfig.targetUsernamesChat !== 'string') {
+			userConfig.targetUsernamesChat = '';
+		}
+
+		// 发送平台设置
+		if (!['auto', 'chat', 'creator'].includes(userConfig.sendPlatform)) {
+			userConfig.sendPlatform = 'auto';
+		}
+
 		// 初始化上次火花日期
 		if (!GM_getValue('lastFireDate')) {
-			const today = new Date().toISOString().split('T')[0];
+			const today = getLocalTodayString();
 			GM_setValue('lastFireDate', today);
 			userConfig.lastFireDate = today;
 		} else {
@@ -477,18 +509,48 @@
 		return userConfig;
 	}
 
+	// 当前页面使用的目标用户名单键（两套界面的名字体系不同，分开放）
+	function getTargetUsernamesKey() {
+		return getPageType() === 'chat' ? 'targetUsernamesChat' : 'targetUsernames';
+	}
+
+	// 当前页面的目标用户名单文本
+	function getTargetUsernamesText() {
+		return userConfig[getTargetUsernamesKey()] || '';
+	}
+
+	// 写入当前页面的目标用户名单文本
+	function setTargetUsernamesText(value) {
+		userConfig[getTargetUsernamesKey()] = value;
+	}
+
 	// 解析目标用户列表
 	function parseTargetUsers() {
-		if (!userConfig.targetUsernames || !userConfig.targetUsernames.trim()) {
+		const rawText = getTargetUsernamesText().trim();
+		if (!rawText) {
 			allTargetUsers = [];
 			userConfig.enableTargetUser = false;
+			if (getPageType() === 'chat') {
+				addHistoryLog('主站私信页使用独立名单（会话里显示的备注名），当前为空，请在设置里填写或用「用户选择」勾选', 'warn');
+			}
 			return;
 		}
 
-		const rawText = userConfig.targetUsernames.trim();
-		allTargetUsers = rawText.split('\n')
+		const seen = new Set();
+		const parsed = rawText.split('\n')
 			.map(user => user.trim())
 			.filter(user => user.length > 0);
+		allTargetUsers = parsed.filter(user => {
+			if (seen.has(user)) {
+				return false;
+			}
+			seen.add(user);
+			return true;
+		});
+
+		if (allTargetUsers.length < parsed.length) {
+			addHistoryLog(`目标用户列表有 ${parsed.length - allTargetUsers.length} 个重复项，已去重`, 'warn');
+		}
 
 		if (allTargetUsers.length > 0) {
 			userConfig.enableTargetUser = true;
@@ -497,13 +559,14 @@
 		addHistoryLog(`解析到 ${allTargetUsers.length} 个目标用户: ${allTargetUsers.join(', ')}`, 'info');
 	}
 
-	// 获取下一个目标用户
-	function getNextTargetUser() {
+	// 获取下一个目标用户（excludeUser 用于"重试时切换下一用户"）
+	function getNextTargetUser(excludeUser) {
 		if (allTargetUsers.length === 0) {
 			return null;
 		}
 
-		const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user) && !failedUsersToday.includes(user));
+		const unsentUsers = allTargetUsers.filter(user =>
+			!sentUsersToday.includes(user) && !failedUsersToday.includes(user) && user !== excludeUser);
 
 		if (unsentUsers.length === 0) {
 			addHistoryLog('所有目标用户今日都已发送或已耗尽重试', 'info');
@@ -524,7 +587,7 @@
 			for (let i = 0; i < allTargetUsers.length; i++) {
 				const index = (currentUserIndex + i) % allTargetUsers.length;
 				const user = allTargetUsers[index];
-				if (!sentUsersToday.includes(user)) {
+				if (!sentUsersToday.includes(user) && !failedUsersToday.includes(user) && user !== excludeUser) {
 					nextUser = user;
 					currentUserIndex = index;
 					found = true;
@@ -612,7 +675,7 @@
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement('a');
 		a.href = url;
-		a.download = `抖音续火助手日志_${new Date().toISOString().split('T')[0]}.txt`;
+		a.download = `抖音续火助手日志_${getLocalTodayString()}.txt`;
 		document.body.appendChild(a);
 		a.click();
 		document.body.removeChild(a);
@@ -666,28 +729,82 @@
 		updateElementStatus('dy-fire-special-hitokoto', status, isSuccess);
 	}
 
-	// 更新火花天数显示
-	function updateFireDaysStatus() {
-		const statusEl = document.getElementById('dy-fire-days');
-		if (statusEl) {
-			statusEl.textContent = userConfig.fireDays;
-			statusEl.style.color = '#00d8b8';
-		}
+	// 按用户记录火花天数
+	function getUserFireDaysMap() {
+		const map = GM_getValue('userFireDays', {});
+		return map && typeof map === 'object' ? map : {};
 	}
 
-	// 更新火花天数（每天第一次发送时调用）
-	function updateFireDays() {
-		const today = new Date().toISOString().split('T')[0];
-		const lastFireDate = userConfig.lastFireDate || '';
-
-		if (lastFireDate !== today) {
-			userConfig.fireDays++;
-			userConfig.lastFireDate = today;
-			GM_setValue('fireDays', userConfig.fireDays);
-			GM_setValue('lastFireDate', today);
-			addHistoryLog(`新的一天开始，火花天数增加为: ${userConfig.fireDays}`, 'success');
-			updateFireDaysStatus();
+	// 读取某用户已记录的火花天数
+	function getUserFireDays(username) {
+		if (!username) {
+			return 0;
 		}
+		return getUserFireDaysMap()[username] || 0;
+	}
+
+	// 记录某用户的火花天数
+	function setUserFireDays(username, days) {
+		if (!username || !days || days <= 0) {
+			return;
+		}
+		const map = getUserFireDaysMap();
+		if (map[username] === days) {
+			return;
+		}
+		map[username] = days;
+		GM_setValue('userFireDays', map);
+	}
+
+	// 更新火花天数显示
+	function updateFireDaysStatus(username) {
+		const statusEl = document.getElementById('dy-fire-days');
+		if (!statusEl) {
+			return;
+		}
+
+		const target = username || currentRetryUser || GM_getValue('lastTargetUser', '');
+		const perUser = getUserFireDays(target);
+
+		if (perUser > 0) {
+			statusEl.textContent = perUser;
+		} else if (getPageType() === 'chat') {
+			// 主站私信页读不到真实天数时不拿全局值顶替
+			statusEl.textContent = '—';
+		} else {
+			statusEl.textContent = userConfig.fireDays;
+		}
+		statusEl.style.color = '#00d8b8';
+	}
+
+	// 更新火花天数（旧版界面无火花数字，按用户逐日自增）
+	function updateFireDays(targetUser) {
+		const today = getLocalTodayString();
+
+		if (!targetUser) {
+			const lastFireDate = userConfig.lastFireDate || '';
+			if (lastFireDate !== today) {
+				userConfig.fireDays++;
+				userConfig.lastFireDate = today;
+				GM_setValue('fireDays', userConfig.fireDays);
+				GM_setValue('lastFireDate', today);
+				addHistoryLog(`新的一天开始，火花天数增加为: ${userConfig.fireDays}`, 'success');
+				updateFireDaysStatus();
+			}
+			return;
+		}
+
+		const userFireDate = GM_getValue('userFireDate', {});
+		if (userFireDate && userFireDate[targetUser] === today) {
+			return;
+		}
+
+		const current = getUserFireDays(targetUser) || userConfig.fireDays || 1;
+		const next = current + 1;
+		setUserFireDays(targetUser, next);
+		GM_setValue('userFireDate', Object.assign({}, userFireDate, { [targetUser]: today }));
+		addHistoryLog(`${targetUser} 火花天数记为: ${next}`, 'success');
+		updateFireDaysStatus(targetUser);
 	}
 
 	// 初始化聊天列表观察器
@@ -1062,7 +1179,12 @@
 			currentTargetUser = currentRetryUser;
 			addHistoryLog(`重试使用同一用户: ${currentTargetUser}`, 'info');
 		} else {
-			currentTargetUser = getNextTargetUser();
+			// 关闭"重试使用同一用户"时优先切换到下一个用户
+			const excludeUser = (retryCount > 1 && allTargetUsers.length > 1) ? currentRetryUser : null;
+			currentTargetUser = getNextTargetUser(excludeUser);
+			if (!currentTargetUser && excludeUser) {
+				currentTargetUser = getNextTargetUser();
+			}
 			currentRetryUser = currentTargetUser;
 		}
 
@@ -1150,6 +1272,10 @@
 
 	// 发送消息函数
 	function sendMessage() {
+		if (!isCurrentPlatformEnabled()) {
+			return;
+		}
+
 		if (isProcessing) {
 			addHistoryLog('已有任务正在进行中', 'error');
 			return;
@@ -1159,7 +1285,7 @@
 		GM_setValue('isMaxRetryReached', false);
 
 		if (userConfig.enableTargetUser && allTargetUsers.length > 0) {
-			const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user));
+			const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user) && !failedUsersToday.includes(user));
 			if (unsentUsers.length === 0) {
 				addHistoryLog('所有目标用户今日都已发送', 'info');
 				return;
@@ -1184,6 +1310,12 @@
 
 	// 执行发送流程
 	async function executeSendProcess() {
+		if (!isCurrentPlatformEnabled()) {
+			isProcessing = false;
+			currentState = 'idle';
+			return;
+		}
+
 		if (isMaxRetryReached && userConfig.retryAfterMaxReached) {
 			const now = Date.now();
 			const intervalMs = userConfig.autoRetryInterval * 60 * 1000;
@@ -1234,10 +1366,10 @@
 
 				addHistoryLog(`已达到最大重试次数 (${userConfig.maxRetryCount})，${userConfig.autoRetryInterval}分钟后将自动重试`, 'error');
 				startAutoRetryTimer();
-				notifyScriptB({ status: 'fail', reason: 'max_retry_will_retry', retryCount: retryCount, nextRetryMinutes: userConfig.autoRetryInterval });
+				notifyScriptB({ final: false, status: 'retrying', reason: 'max_retry_will_retry', retryCount: retryCount, nextRetryMinutes: userConfig.autoRetryInterval });
 			} else {
 				addHistoryLog(`已达到最大重试次数 (${userConfig.maxRetryCount})，停止重试`, 'error');
-				notifyScriptB({ status: 'fail', reason: 'max_retry_stopped', retryCount: retryCount });
+				notifyScriptB({ status: 'all_failed', reason: 'max_retry_stopped', retryCount: retryCount });
 			}
 
 			isProcessing = false;
@@ -1250,6 +1382,54 @@
 		addHistoryLog(`尝试发送 (${retryCount}/${userConfig.maxRetryCount})`, 'info');
 
 		if (userConfig.enableTargetUser && allTargetUsers.length > 0) {
+			if (getPageType() === 'chat') {
+				// 主站私信页：用搜索框定位目标用户
+				let currentTargetUser;
+				if (userConfig.multiUserRetrySame && retryCount > 1 && currentRetryUser) {
+					currentTargetUser = currentRetryUser;
+					addHistoryLog(`重试使用同一用户: ${currentTargetUser}`, 'info');
+				} else {
+					const excludeUser = (retryCount > 1 && allTargetUsers.length > 1) ? currentRetryUser : null;
+					currentTargetUser = getNextTargetUser(excludeUser);
+					if (!currentTargetUser && excludeUser) {
+						currentTargetUser = getNextTargetUser();
+					}
+					currentRetryUser = currentTargetUser;
+				}
+				if (!currentTargetUser) {
+					addHistoryLog('没有可发送的目标用户（全部已完成或已耗尽重试）', 'info');
+					updateUserStatus('无目标用户', false);
+					isProcessing = false;
+					currentRetryUser = null;
+					checkAllUsersProcessed();
+					return;
+				}
+
+				currentRetryUser = currentTargetUser;
+				GM_setValue('lastTargetUser', currentTargetUser);
+				GM_setValue('searchAttemptCount', 0);
+				updateUserStatus(`寻找: ${currentTargetUser}`, null);
+				currentState = 'searching';
+
+				if (searchTimeoutId) {
+					clearTimeout(searchTimeoutId);
+					searchTimeoutId = null;
+				}
+
+				const opened = await openConversationBySearch(currentTargetUser);
+				if (!opened) {
+					addHistoryLog(`未能打开与 ${currentTargetUser} 的会话`, 'error');
+					updateUserStatus('会话未打开', false);
+					currentState = 'idle';
+					setTimeout(executeSendProcess, 5000);
+					return;
+				}
+
+				currentState = 'found';
+				await tryFindChatInputChat();
+				return;
+			}
+
 			// 停止旧的观察器，准备重新开始
 			stopChatObserver('准备切换标签页', true);
 			// 确保当前在“全部”标签页
@@ -1284,7 +1464,11 @@
 				searchTimeoutId = null;
 			}
 		} else {
-			setTimeout(tryFindChatInput, 1000);
+			if (getPageType() === 'chat') {
+				setTimeout(tryFindChatInputChat, 1000);
+			} else {
+				setTimeout(tryFindChatInput, 1000);
+			}
 		}
 	}
 
@@ -1338,6 +1522,483 @@
 		autoSendIfNeeded();
 	}
 
+	// ==================== 主站私信页（www.douyin.com/chat）支持 ====================
+
+	// 页面类型
+	function getPageType() {
+		if (location.hostname.includes('creator.douyin.com')) {
+			return 'creator';
+		}
+		if (location.hostname.includes('douyin.com')) {
+			return 'chat';
+		}
+		return 'unknown';
+	}
+
+	// 发送平台设置的可读名称
+	function getPlatformLabel(platform) {
+		if (platform === 'chat') {
+			return '仅主站私信页';
+		}
+		if (platform === 'creator') {
+			return '仅创作者中心';
+		}
+		return '自动（按当前页面）';
+	}
+
+	// 当前页面是否允许执行发送
+	function isCurrentPlatformEnabled() {
+		const platform = userConfig.sendPlatform || 'auto';
+		if (platform === 'auto') {
+			return true;
+		}
+		return platform === getPageType();
+	}
+
+	// 主站私信页选择器
+	const CHAT_PAGE_SELECTORS = {
+		SEARCH_INPUT: 'input.semi-input[placeholder="搜索"][type="text"]',
+		CHAT_BTN: 'div[class*="SearchPanelitemchat_btn"]',
+		EDITOR: 'div[data-slate-editor="true"][contenteditable="true"]',
+		SPARK: 'div.commonStreaknormalText',
+		CONVERSATION_LIST: '.conversationConversationListwrapper',
+		NAME: '.conversationConversationItemtitle'
+	};
+
+	// 键盘事件
+	function fireKeyEvent(element, type, key, options = {}) {
+		element.dispatchEvent(new KeyboardEvent(type, {
+			key: key,
+			code: key,
+			bubbles: true,
+			cancelable: true,
+			...options
+		}));
+	}
+
+	// 主站私信页读取火花天数（只取当前会话，忽略列表与隐藏面板里的数字）
+	function readChatPageFireDays(username) {
+		const sparkEl = findCurrentChatSparkEl(username);
+		if (!sparkEl) {
+			return 0;
+		}
+		const matched = sparkEl.textContent.match(/(\d+)/);
+		return matched ? parseInt(matched[1], 10) : 0;
+	}
+
+	// 主站私信页当前会话的火花元素
+	function findCurrentChatSparkEl(username) {
+		if (getPageType() !== 'chat') {
+			return null;
+		}
+
+		const sparks = Array.from(document.querySelectorAll(CHAT_PAGE_SELECTORS.SPARK))
+			.filter(sparkEl => !isInsideConversationList(sparkEl) && sparkEl.offsetParent !== null);
+		if (sparks.length === 0) {
+			return null;
+		}
+
+		if (!username) {
+			return sparks[0];
+		}
+
+		// 头部容器里包含当前目标昵称，才算这个会话的火花
+		for (const sparkEl of sparks) {
+			let node = sparkEl;
+			for (let level = 0; level < 6 && node; level++) {
+				node = node.parentElement;
+				if (node && node.textContent.includes(username)) {
+					return sparkEl;
+				}
+			}
+		}
+		return null;
+	}
+
+	// 是否位于左侧会话列表内
+	function isInsideConversationList(element) {
+		const list = document.querySelector(CHAT_PAGE_SELECTORS.CONVERSATION_LIST);
+		if (list && list.contains(element)) {
+			return true;
+		}
+		let node = element;
+		for (let level = 0; level < 6 && node; level++) {
+			const className = node.className;
+			if (typeof className === 'string' && className.includes('conversationConversation')) {
+				return true;
+			}
+			node = node.parentElement;
+		}
+		return false;
+	}
+
+	// 主站私信页火花状态（重燃中 x/y）
+	function readChatPageStreakState(username) {
+		const sparkEl = findCurrentChatSparkEl(username);
+		if (!sparkEl || !sparkEl.parentElement) {
+			return '';
+		}
+		const text = sparkEl.parentElement.textContent.replace(/\s+/g, ' ').trim();
+		const matched = text.match(/重燃中\s*\d+\s*\/\s*\d+/);
+		return matched ? matched[0] : '';
+	}
+
+	// 主站私信页搜索框写值
+	function setChatSearchInput(searchInput, value) {
+		const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+		searchInput.focus();
+		valueSetter.call(searchInput, value);
+		searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+		searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+	}
+
+	// 主站私信页清空搜索框
+	function clearChatSearchInput(searchInput) {
+		if (!searchInput) {
+			return;
+		}
+		const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+		valueSetter.call(searchInput, '');
+		searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+		searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+	}
+
+	// 主站私信页搜索是否已提示无结果
+	function isChatSearchEmpty(searchInput) {
+		const scope = searchInput.closest('[class*="SearchPanel"]') || document;
+		const nodes = scope.querySelectorAll('div, span');
+		const limit = Math.min(nodes.length, 500);
+		for (let i = 0; i < limit; i++) {
+			const node = nodes[i];
+			if (node.children.length === 0 && node.textContent.trim() === '未搜索到相关内容') {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// 通过搜索框打开目标会话
+	async function openConversationBySearch(username) {
+		let searchInput = null;
+		for (let wait = 0; wait < 20; wait++) {
+			searchInput = document.querySelector(CHAT_PAGE_SELECTORS.SEARCH_INPUT);
+			if (searchInput) {
+				break;
+			}
+			await sleep(500);
+		}
+		if (!searchInput) {
+			addHistoryLog('等待搜索框超时，无法查找用户', 'error');
+			return false;
+		}
+
+		setChatSearchInput(searchInput, username);
+
+		for (let round = 0; round < 20; round++) {
+			await sleep(300);
+			const buttons = document.querySelectorAll(CHAT_PAGE_SELECTORS.CHAT_BTN);
+			for (const button of buttons) {
+				let container = button;
+				let matchedName = false;
+				for (let level = 0; level < 5 && container; level++) {
+					container = container.parentElement;
+					if (container && container.textContent.includes(username)) {
+						matchedName = true;
+						break;
+					}
+				}
+				if (!matchedName) {
+					continue;
+				}
+
+				addHistoryLog(`搜索结果命中: ${username}`, 'info');
+				button.click();
+
+				for (let wait = 0; wait < 20; wait++) {
+					await sleep(300);
+					if (document.querySelector(CHAT_PAGE_SELECTORS.EDITOR)) {
+						clearChatSearchInput(searchInput);
+						return true;
+					}
+				}
+				return false;
+			}
+
+			if (isChatSearchEmpty(searchInput)) {
+				addHistoryLog(`搜索无结果: ${username}`, 'warn');
+				return false;
+			}
+		}
+
+		addHistoryLog(`搜索未找到用户: ${username}`, 'warn');
+		return false;
+	}
+
+	// 清空主站私信页输入框（每行是一个 .ace-line 节点）
+	async function clearSlateEditor(editor) {
+		const isEmpty = () => editor.textContent.replace(/\u200b/g, '').trim() === '';
+
+		editor.focus();
+		try {
+			const selection = window.getSelection();
+			const range = document.createRange();
+			range.selectNodeContents(editor);
+			selection.removeAllRanges();
+			selection.addRange(range);
+			document.execCommand('delete');
+		} catch (error) {
+			addHistoryLog(`清空输入框失败: ${error.message}`, 'warn');
+		}
+		await sleep(80);
+
+		if (isEmpty()) {
+			return true;
+		}
+
+		// 兜底：直接重建一个空的编辑行，避免旧内容被一起发出
+		try {
+			const emptyLine = document.createElement('div');
+			emptyLine.className = 'ace-line';
+			emptyLine.setAttribute('data-node', 'true');
+			emptyLine.setAttribute('dir', 'auto');
+
+			const emptySpan = document.createElement('span');
+			emptySpan.setAttribute('data-string', 'true');
+			emptySpan.setAttribute('data-enter', 'true');
+			emptySpan.setAttribute('data-leaf', 'true');
+			emptyLine.appendChild(emptySpan);
+
+			while (editor.firstChild) {
+				editor.removeChild(editor.firstChild);
+			}
+			editor.appendChild(emptyLine);
+			editor.dispatchEvent(new InputEvent('input', {
+				bubbles: true,
+				cancelable: true,
+				inputType: 'deleteContentBackward'
+			}));
+			await sleep(80);
+			addHistoryLog('输入框原有内容未能删除，已强制清空', 'warn');
+		} catch (error) {
+			addHistoryLog(`强制清空输入框失败: ${error.message}`, 'error');
+		}
+
+		return isEmpty();
+	}
+
+	// 整段粘贴写入（该编辑器原生处理粘贴文本里的换行）
+	async function pasteTextToSlateEditor(editor, message) {
+		try {
+			const dataTransfer = new DataTransfer();
+			dataTransfer.setData('text/plain', message);
+			editor.dispatchEvent(new ClipboardEvent('paste', {
+				bubbles: true,
+				cancelable: true,
+				clipboardData: dataTransfer
+			}));
+			await sleep(600);
+
+			const expected = String(message).replace(/\u200b/g, '').replace(/\s+/g, '');
+			const actual = editor.textContent.replace(/\u200b/g, '').replace(/\s+/g, '');
+			if (expected.length > 0 && actual === expected) {
+				return true;
+			}
+			addHistoryLog(`粘贴写入结果与预期不一致（预期 ${expected.length} 字，实际 ${actual.length} 字）`, 'warn');
+			return false;
+		} catch (error) {
+			addHistoryLog(`粘贴写入失败: ${error.message}`, 'warn');
+			return false;
+		}
+	}
+
+	// 主站私信页写入消息（优先整段粘贴，失败再逐字符输入）
+	// 逐字符写入（该编辑器无法合成换行，只用于单行文本）
+	async function typeTextToSlateEditor(editor, text) {
+		for (const char of String(text)) {
+			if (document.activeElement !== editor) {
+				editor.focus();
+			}
+
+			let inserted = false;
+			try {
+				inserted = document.execCommand('insertText', false, char);
+			} catch (error) {
+				inserted = false;
+			}
+
+			if (!inserted) {
+				const selection = window.getSelection();
+				const range = document.createRange();
+				range.selectNodeContents(editor);
+				range.collapse(false);
+				selection.removeAllRanges();
+				selection.addRange(range);
+
+				const textNode = document.createTextNode(char);
+				range.insertNode(textNode);
+				range.setStartAfter(textNode);
+				range.setEndAfter(textNode);
+				selection.removeAllRanges();
+				selection.addRange(range);
+
+				editor.dispatchEvent(new InputEvent('input', {
+					bubbles: true,
+					cancelable: true,
+					data: char,
+					inputType: 'insertText',
+					isComposing: false
+				}));
+			}
+
+			await sleep(20 + Math.random() * 30);
+		}
+
+		return editor.textContent.replace(/\u200b/g, '').trim().length > 0;
+	}
+
+	// 主站私信页写入消息（先整段粘贴，失败再单行逐字符；结果不符就不发）
+	async function writeMessageToSlateEditor(editor, message) {
+		if (!editor) {
+			return false;
+		}
+
+		if (!await clearSlateEditor(editor)) {
+			addHistoryLog('输入框清空失败，取消本次发送以避免发出脏内容', 'error');
+			return false;
+		}
+
+		if (await pasteTextToSlateEditor(editor, message)) {
+			return true;
+		}
+
+		if (!await clearSlateEditor(editor)) {
+			addHistoryLog('输入框清空失败，取消本次发送以避免发出脏内容', 'error');
+			return false;
+		}
+
+		const singleLine = String(message).split('\n').map(line => line.trim()).filter(Boolean).join(' ');
+		addHistoryLog('粘贴写入不可用，改用单行逐字符写入', 'warn');
+		if (!await typeTextToSlateEditor(editor, singleLine)) {
+			return false;
+		}
+
+		const expected = singleLine.replace(/\s+/g, '');
+		const actual = editor.textContent.replace(/\u200b/g, '').replace(/\s+/g, '');
+		if (expected !== actual) {
+			addHistoryLog('逐字符写入结果与预期不符，取消本次发送', 'error');
+			return false;
+		}
+
+		return true;
+	}
+
+	// 主站私信页发送按钮（输入框同容器内的最后一个按钮）
+	function findComposerSendButton(editor) {
+		let container = editor;
+		for (let level = 0; level < 6 && container; level++) {
+			container = container.parentElement;
+			if (!container) {
+				break;
+			}
+			const buttons = Array.from(container.querySelectorAll('button')).filter(button =>
+				button !== editor && !editor.contains(button) && !button.contains(editor) && button.offsetParent !== null);
+			if (buttons.length > 0) {
+				return buttons[buttons.length - 1];
+			}
+		}
+		return null;
+	}
+
+	// 主站私信页查找输入框并发送消息
+	async function tryFindChatInputChat() {
+		if (chatInputCheckTimer) {
+			clearTimeout(chatInputCheckTimer);
+		}
+
+		const editor = document.querySelector(CHAT_PAGE_SELECTORS.EDITOR);
+		if (!editor) {
+			chatInputNotFoundCount++;
+			if (chatInputNotFoundCount === 1 || chatInputNotFoundCount % 5 === 0) {
+				addHistoryLog(`未找到聊天输入框，继续查找中... (${chatInputNotFoundCount})`, 'info');
+			}
+			if (chatInputNotFoundCount >= userConfig.maxRetryCount) {
+				addHistoryLog(`查找聊天输入框超过最大重试次数 (${userConfig.maxRetryCount})，触发重试流程`, 'error');
+				chatInputNotFoundCount = 0;
+				setTimeout(executeSendProcess, 5000);
+				return;
+			}
+			chatInputCheckTimer = setTimeout(tryFindChatInputChat, userConfig.chatInputCheckInterval);
+			return;
+		}
+
+		chatInputNotFoundCount = 0;
+		addHistoryLog('找到聊天输入框', 'info');
+
+		const sendTargetUser = currentRetryUser || GM_getValue('lastTargetUser', '') || '';
+		const rowTextBefore = sendTargetUser ? getConversationRowText(sendTargetUser) : '';
+
+		const sparkDays = readChatPageFireDays(sendTargetUser);
+		if (sparkDays > 0 && sendTargetUser) {
+			setUserFireDays(sendTargetUser, sparkDays);
+			updateFireDaysStatus(sendTargetUser);
+			addHistoryLog(`页面火花天数: ${sendTargetUser} ${sparkDays} 天`, 'info');
+		} else if (sendTargetUser) {
+			const knownDays = getUserFireDays(sendTargetUser);
+			updateFireDaysStatus(sendTargetUser);
+			addHistoryLog(knownDays > 0
+				? `${sendTargetUser} 本次未读到火花数字，沿用已记录 ${knownDays} 天`
+				: `${sendTargetUser} 未读到火花数字，按未知处理`, 'warn');
+		}
+
+		const streakState = readChatPageStreakState(sendTargetUser);
+		if (streakState) {
+			addHistoryLog(`火花状态: ${streakState}`, 'warn');
+		}
+
+		let messageToSend;
+		try {
+			messageToSend = await getMessageContent(sendTargetUser);
+			addHistoryLog('消息内容准备完成', 'success');
+		} catch (error) {
+			addHistoryLog(`消息获取失败: ${error.message}`, 'error');
+			messageToSend = `${userConfig.baseMessage} | 消息获取失败~`;
+		}
+
+		currentState = 'sending';
+
+		if (!await writeMessageToSlateEditor(editor, messageToSend)) {
+			addHistoryLog('消息未写入输入框，取消本次发送', 'error');
+			updateUserStatus('写入失败', false);
+			currentState = 'idle';
+			isProcessing = false;
+			setTimeout(executeSendProcess, 5000);
+			return;
+		}
+
+		addHistoryLog('正在发送消息...', 'info');
+		await sleep(600);
+
+		const sendButton = findComposerSendButton(editor);
+		if (sendButton) {
+			sendButton.click();
+		} else {
+			fireKeyEvent(editor, 'keydown', 'Enter');
+			fireKeyEvent(editor, 'keypress', 'Enter');
+			fireKeyEvent(editor, 'keyup', 'Enter');
+		}
+
+		if (!await confirmSend(editor, messageToSend, sendTargetUser, rowTextBefore)) {
+			addHistoryLog('发送未确认（输入框未清空且目标会话未出现该消息），不计为已发送，稍后重试', 'error');
+			updateUserStatus('发送未确认', false);
+			currentState = 'idle';
+			isProcessing = false;
+			setTimeout(executeSendProcess, 5000);
+			return;
+		}
+
+		completeSend(sendTargetUser);
+	}
+
 	// 尝试查找聊天输入框并发送消息
 	async function tryFindChatInput() {
 		if (chatInputCheckTimer) {
@@ -1349,9 +2010,12 @@
 			chatInputNotFoundCount = 0;
 			addHistoryLog('找到聊天输入框', 'info');
 
+			// 以当前重试目标为准，避免并发查找把 lastTargetUser 推进到下一个人
+			const sendTargetUser = currentRetryUser || GM_getValue('lastTargetUser', '') || '';
+
 			let messageToSend;
 			try {
-				messageToSend = await getMessageContent();
+				messageToSend = await getMessageContent(sendTargetUser);
 				addHistoryLog('消息内容准备完成', 'success');
 			} catch (error) {
 				addHistoryLog(`消息获取失败: ${error.message}`, 'error');
@@ -1359,86 +2023,28 @@
 			}
 
 			currentState = 'sending';
-			input.textContent = '';
-			input.innerHTML = messageToSend.split('\n').map(line => {
-				const escaped = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-				return escaped || '<br>';
-			}).join('<br>');
-			input.dispatchEvent(new InputEvent('input', {
-				bubbles: true,
-				cancelable: true,
-				inputType: 'insertText',
-				data: messageToSend
-			}));
 
-			setTimeout(() => {
-				const sendBtn = document.querySelector('.chat-btn');
-				if (sendBtn && !sendBtn.disabled) {
-					addHistoryLog('正在发送消息...', 'info');
-					sendBtn.click();
+			if (!writeMessageToComposer(input, messageToSend)) {
+				addHistoryLog('消息未写入输入框，取消本次发送', 'error');
+				updateUserStatus('写入失败', false);
+				currentState = 'idle';
+				isProcessing = false;
+				setTimeout(executeSendProcess, 5000);
+				return;
+			}
 
-					setTimeout(() => {
-						addHistoryLog('消息发送成功！', 'success');
+			addHistoryLog('正在发送消息...', 'info');
+			const sendConfirmed = await clickSendAndConfirm(input, messageToSend, sendTargetUser);
+			if (!sendConfirmed) {
+				addHistoryLog('发送未确认（输入框未清空且目标会话未出现该消息），不计为已发送，稍后重试', 'error');
+				updateUserStatus('发送未确认', false);
+				currentState = 'idle';
+				isProcessing = false;
+				setTimeout(executeSendProcess, 5000);
+				return;
+			}
 
-						updateFireDays();
-
-						if (userConfig.enableTargetUser && allTargetUsers.length > 0) {
-							const currentTargetUser = GM_getValue('lastTargetUser', '');
-							if (currentTargetUser) {
-								markUserAsSent(currentTargetUser);
-							}
-						} else {
-							const today = new Date().toDateString();
-							GM_setValue('lastSentDate', today);
-							updateUserStatusDisplay();
-						}
-
-						updateStatus(true);
-						isProcessing = false;
-						currentState = 'idle';
-						if (chatObserver) {
-							stopChatObserver('消息发送成功');
-						} else {
-							addHistoryLog('消息发送完成，观察器已不存在无需停止', 'info');
-						}
-						currentRetryUser = null;
-
-						retryCount = 0;
-						isMaxRetryReached = false;
-						GM_setValue('retryCount', retryCount);
-						GM_setValue('isMaxRetryReached', false);
-						updateRetryCount();
-
-						if (userConfig.enableTargetUser && allTargetUsers.length > 0) {
-							const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user));
-							if (unsentUsers.length > 0) {
-								addHistoryLog(`还有 ${unsentUsers.length} 个用户待发送，继续下一个用户`, 'info');
-								setTimeout(sendMessage, 2000);
-							} else {
-								addHistoryLog('所有用户发送完成！', 'success');
-								notifyScriptB({ mode: 'multi', status: 'success', totalSent: sentUsersToday.length });
-							}
-						} else {
-							notifyScriptB({ mode: 'single', status: 'success' });
-						}
-
-						if (typeof GM_notification !== 'undefined') {
-							try {
-								GM_notification({
-									title: '抖音续火助手',
-									text: '续火消息发送成功！',
-									timeout: 3000
-								});
-							} catch (e) {
-								GM_notification('续火消息发送成功！', '抖音续火助手');
-							}
-						}
-					}, 1000);
-				} else {
-					addHistoryLog('发送按钮不可用', 'error');
-					setTimeout(executeSendProcess, 2000);
-				}
-			}, 500);
+			completeSend(sendTargetUser);
 		} else {
 			chatInputNotFoundCount++;
 			if (chatInputNotFoundCount === 1 || chatInputNotFoundCount % 5 === 0) {
@@ -1457,8 +2063,155 @@
 		}
 	}
 
+	// 把消息写入输入框
+	function writeMessageToComposer(input, message) {
+		input.textContent = '';
+		input.innerHTML = message.split('\n').map(line => {
+			const escaped = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+			return escaped || '<br>';
+		}).join('<br>');
+		input.dispatchEvent(new InputEvent('input', {
+			bubbles: true,
+			cancelable: true,
+			inputType: 'insertText',
+			data: message
+		}));
+
+		return input.textContent.replace(/\u200b/g, '').trim().length > 0;
+	}
+
+	// 输入框是否已清空
+	function isComposerEmpty(input) {
+		return input.textContent.replace(/\u200b/g, '').trim() === '';
+	}
+
+	// 会话列表里该用户那一行的完整文本（含最后一条消息预览）
+	function getConversationRowText(username) {
+		const nameEls = document.querySelectorAll('[class*="item-header-name-"]');
+		for (const el of nameEls) {
+			if (el.textContent.trim() !== username) {
+				continue;
+			}
+			let row = el;
+			for (let i = 0; i < 6 && row; i++) {
+				row = row.parentElement;
+				if (row && row.textContent.trim() !== username) {
+					return row.textContent;
+				}
+			}
+		}
+		return '';
+	}
+
+	// 取消息首行前若干字符，用于在会话预览里确认消息已发出
+	function getMessageProbe(message) {
+		const firstLine = message.split('\n').find(line => line.trim()) || '';
+		return firstLine.trim().slice(0, 6);
+	}
+
+	// 轮询确认：输入框被清空，或目标会话预览里出现本条消息
+	async function confirmSend(input, message, targetUser, rowTextBefore) {
+		const probe = getMessageProbe(message);
+
+		for (let i = 0; i < 16; i++) {
+			await sleep(500);
+			if (isComposerEmpty(input)) {
+				return true;
+			}
+			if (targetUser) {
+				const rowText = getConversationRowText(targetUser);
+				if (probe && rowText.includes(probe) && rowText !== rowTextBefore) {
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	// 创作者中心：点击发送按钮并确认
+	async function clickSendAndConfirm(input, message, targetUser) {
+		const sendBtn = document.querySelector('.chat-btn');
+		if (!sendBtn) {
+			addHistoryLog('未找到发送按钮', 'error');
+			return false;
+		}
+
+		const rowTextBefore = targetUser ? getConversationRowText(targetUser) : '';
+
+		// 等应用把输入内容同步到自身状态后再点发送
+		await sleep(600);
+		sendBtn.click();
+
+		return await confirmSend(input, message, targetUser, rowTextBefore);
+	}
+
+	// 发送确认通过后的记账与收尾
+	function completeSend(targetUser) {
+		addHistoryLog('消息发送成功！', 'success');
+
+		if (getPageType() === 'chat') {
+			// 主站私信页：只认页面上的真实火花天数
+			const afterDays = readChatPageFireDays(targetUser);
+			if (afterDays > 0 && targetUser) {
+				setUserFireDays(targetUser, afterDays);
+			}
+			updateFireDaysStatus(targetUser);
+		} else {
+			updateFireDays(targetUser);
+		}
+
+		if (userConfig.enableTargetUser && allTargetUsers.length > 0) {
+			if (targetUser) {
+				markUserAsSent(targetUser);
+			}
+		} else {
+			GM_setValue('lastSentDate', new Date().toDateString());
+			updateUserStatusDisplay();
+		}
+
+		updateStatus(true);
+		isProcessing = false;
+		currentState = 'idle';
+		if (chatObserver) {
+			stopChatObserver('消息发送成功');
+		}
+		currentRetryUser = null;
+
+		retryCount = 0;
+		isMaxRetryReached = false;
+		GM_setValue('retryCount', retryCount);
+		GM_setValue('isMaxRetryReached', false);
+		updateRetryCount();
+
+		if (userConfig.enableTargetUser && allTargetUsers.length > 0) {
+			const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user) && !failedUsersToday.includes(user));
+			if (unsentUsers.length > 0) {
+				addHistoryLog(`还有 ${unsentUsers.length} 个用户待发送，继续下一个用户`, 'info');
+				setTimeout(sendMessage, 2000);
+			} else {
+				addHistoryLog('所有用户发送完成！', 'success');
+				notifyScriptB({ mode: 'multi', status: 'success', totalSent: sentUsersToday.length });
+			}
+		} else {
+			notifyScriptB({ mode: 'single', status: 'success' });
+		}
+
+		if (typeof GM_notification !== 'undefined') {
+			try {
+				GM_notification({
+					title: '抖音续火助手',
+					text: '续火消息发送成功！',
+					timeout: 3000
+				});
+			} catch (e) {
+				GM_notification('续火消息发送成功！', '抖音续火助手');
+			}
+		}
+	}
+
 	// 获取消息内容
-	async function getMessageContent() {
+	async function getMessageContent(targetUser) {
 		let customMessage = userConfig.customMessage || userConfig.baseMessage;
 
 		let hitokotoContent = '';
@@ -1497,6 +2250,22 @@
 			}
 		}
 
+		const skippedSegments = [];
+		const keepOrSkip = (text, label) => {
+			if (String(text || '').trim()) {
+				return text;
+			}
+			skippedSegments.push(label);
+			return '';
+		};
+
+		hitokotoContent = userConfig.useHitokoto ? keepOrSkip(hitokotoContent, '一言') : hitokotoContent;
+		txtApiContent = userConfig.useTxtApi ? keepOrSkip(txtApiContent, 'TXTAPI') : txtApiContent;
+		specialHitokotoContent = userConfig.useSpecialHitokoto ? keepOrSkip(specialHitokotoContent, '专属一言') : specialHitokotoContent;
+		if (skippedSegments.length > 0) {
+			addHistoryLog(`${skippedSegments.join('、')}内容为空，已跳过对应段落`, 'warn');
+		}
+
 		if (customMessage.includes('[API]')) {
 			customMessage = customMessage.replace(/\[API\]/g, hitokotoContent);
 		} else if (userConfig.useHitokoto) {
@@ -1516,7 +2285,24 @@
 		}
 
 		if (customMessage.includes('[天数]')) {
-			customMessage = customMessage.replace(/\[天数\]/g, userConfig.fireDays || 1);
+			let fireDays = getUserFireDays(targetUser);
+			if (!fireDays && getPageType() !== 'chat') {
+				// 旧版界面没有火花数字，沿用全局计数
+				fireDays = userConfig.fireDays || 1;
+			}
+			if (!fireDays) {
+				addHistoryLog(`未读到 ${targetUser || '当前用户'} 的火花天数，本条消息天数留空`, 'warn');
+			}
+			customMessage = customMessage.replace(/\[天数\]/g, fireDays || '');
+		}
+
+		if (skippedSegments.length > 0) {
+			customMessage = customMessage.replace(/\n{3,}/g, '\n\n').trim();
+		}
+
+		if (!customMessage.trim()) {
+			addHistoryLog('消息内容为空，回退为基础文案', 'warn');
+			customMessage = userConfig.baseMessage || '续火';
 		}
 
 		return customMessage;
@@ -1677,7 +2463,19 @@
 
 	// 解析时间字符串为日期对象
 	function parseTimeString(timeStr) {
-		const [hours, minutes, seconds] = timeStr.split(':').map(Number);
+		const parts = String(timeStr || '').split(':').map(part => Number(part));
+		const [hours, minutes, seconds] = parts;
+		const valid = parts.length >= 2 && parts.length <= 3 &&
+			parts.every(part => Number.isInteger(part)) &&
+			hours >= 0 && hours <= 23 &&
+			minutes >= 0 && minutes <= 59 &&
+			(seconds === undefined || (seconds >= 0 && seconds <= 59));
+
+		if (!valid) {
+			addHistoryLog(`发送时间"${timeStr}"非法，改用默认时间 ${DEFAULT_CONFIG.sendTime}`, 'error');
+			return parseTimeString(DEFAULT_CONFIG.sendTime);
+		}
+
 		const now = new Date();
 		const targetTime = new Date(now);
 		targetTime.setHours(hours, minutes, seconds || 0, 0);
@@ -1695,13 +2493,39 @@
 			return parseTimeString(userConfig.sendTime);
 		}
 
+		const parseRange = (value, label) => {
+			const parts = String(value || '').split(':').map(part => Number(part));
+			const [h, m, s] = parts;
+			const valid = parts.length >= 2 && parts.length <= 3 &&
+				parts.every(part => Number.isInteger(part)) &&
+				h >= 0 && h <= 23 && m >= 0 && m <= 59 &&
+				(s === undefined || (s >= 0 && s <= 59));
+
+			if (!valid) {
+				addHistoryLog(`随机时间区间${label}"${value}"非法`, 'error');
+				return null;
+			}
+
+			return { h, m, s: s || 0 };
+		};
+
+		const start = parseRange(userConfig.sendTimeRangeStart, '起点');
+		const end = parseRange(userConfig.sendTimeRangeEnd, '终点');
+		if (!start || !end) {
+			addHistoryLog(`随机时间区间不可用，改用默认时间 ${DEFAULT_CONFIG.sendTime}`, 'error');
+			return parseTimeString(DEFAULT_CONFIG.sendTime);
+		}
+
 		const now = new Date();
 
-		const [startHour, startMinute, startSecond] = userConfig.sendTimeRangeStart.split(':').map(Number);
-		const [endHour, endMinute, endSecond] = userConfig.sendTimeRangeEnd.split(':').map(Number);
+		const startMinutes = start.h * 60 + start.m;
+		const endMinutes = end.h * 60 + end.m;
 
-		const startMinutes = startHour * 60 + startMinute;
-		const endMinutes = endHour * 60 + endMinute;
+		// 起止相同即固定时间，而非覆盖全天
+		if (startMinutes === endMinutes) {
+			const fixed = `${String(start.h).padStart(2, '0')}:${String(start.m).padStart(2, '0')}:${String(start.s).padStart(2, '0')}`;
+			return parseTimeString(fixed);
+		}
 
 		let randomMinutes;
 
@@ -1715,7 +2539,7 @@
 		const randomMinute = randomMinutes % 60;
 
 		const targetTime = new Date(now);
-		targetTime.setHours(randomHour, randomMinute, startSecond || 0, 0);
+		targetTime.setHours(randomHour, randomMinute, start.s, 0);
 
 		if (targetTime <= now) {
 			targetTime.setDate(targetTime.getDate() + 1);
@@ -1867,7 +2691,7 @@
 						resetTodaySentUsers();
 					}
 
-					const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user));
+					const unsentUsers = allTargetUsers.filter(user => !sentUsersToday.includes(user) && !failedUsersToday.includes(user));
 					if (unsentUsers.length > 0) {
 						if (!isProcessing) {
 							addHistoryLog('倒计时结束，开始发送给未发送的用户', 'info');
@@ -2047,7 +2871,7 @@
 			return;
 		}
 
-		const sentCount = sentUsersToday.length;
+		const sentCount = allTargetUsers.filter(u => sentUsersToday.includes(u)).length;
 		const totalCount = allTargetUsers.length;
 		const progressText = `${sentCount}/${totalCount}`;
 
@@ -2184,6 +3008,62 @@
 	}
 
 	// 显示用户选择面板
+	// 主站私信页收集会话列表里的用户（会话名即备注名）
+	async function collectChatPageUsers(panelEl, onNewItems, onDone) {
+		const list = document.querySelector(CHAT_PAGE_SELECTORS.CONVERSATION_LIST);
+		if (!list) {
+			addHistoryLog('未找到会话列表，无法收集用户', 'error');
+			onDone();
+			return;
+		}
+
+		const seen = new Set();
+		const scan = () => {
+			const fresh = [];
+			document.querySelectorAll(CHAT_PAGE_SELECTORS.NAME).forEach(nameEl => {
+				const name = nameEl.textContent.trim();
+				if (!name || seen.has(name)) {
+					return;
+				}
+				seen.add(name);
+				fresh.push(name);
+			});
+			return fresh;
+		};
+
+		const initial = scan();
+		if (initial.length > 0) {
+			onNewItems(initial);
+		}
+
+		list.scrollTop = 0;
+		await sleep(300);
+
+		let lastScrollTop = -1;
+		let stuckCount = 0;
+		for (let i = 0; i < 200; i++) {
+			list.scrollTop += list.clientHeight;
+			await sleep(350);
+
+			const fresh = scan();
+			if (fresh.length > 0) {
+				onNewItems(fresh);
+			}
+
+			if (list.scrollTop === lastScrollTop) {
+				if (++stuckCount >= 4) {
+					break;
+				}
+			} else {
+				stuckCount = 0;
+			}
+			lastScrollTop = list.scrollTop;
+		}
+
+		list.scrollTop = 0;
+		onDone();
+	}
+
 	function showUserSelectPanel() {
 		const existingPanel = document.getElementById('dy-fire-user-select-panel');
 		if (existingPanel) {
@@ -2192,8 +3072,9 @@
 		}
 
 		let currentTargetUsers = [];
-		if (userConfig.targetUsernames && userConfig.targetUsernames.trim()) {
-			currentTargetUsers = userConfig.targetUsernames.split('\n')
+		const currentTargetText = getTargetUsernamesText();
+		if (currentTargetText.trim()) {
+			currentTargetUsers = currentTargetText.split('\n')
 				.map(u => u.trim())
 				.filter(u => u.length > 0);
 		}
@@ -2279,7 +3160,8 @@
 			const frag = document.createDocumentFragment();
 			nicknames.forEach(nickname => {
 				const userId = n2id[nickname];
-				const isGroup = !userId;
+				// 主站私信页拿不到 user_id 映射，不做群聊标记
+				const isGroup = getPageType() === 'chat' ? false : !userId;
 				// value 统一存昵称，user_id 通过 data-user-id 附带（用于 nicknameUserIdMap）
 				const isChecked = currentTargetUsers.includes(nickname);
 				const safeNickname = escapeHtml(nickname);
@@ -2328,7 +3210,7 @@
 				}
 			});
 			GM_setValue('nicknameUserIdMap', nicknameUserIdMap);
-			userConfig.targetUsernames = selected.join('\n');
+			setTargetUsernamesText(selected.join('\n'));
 			saveConfig();
 			parseTargetUsers();
 			updateUserStatusDisplay();
@@ -2343,7 +3225,11 @@
 		});
 
 		// 启动增量滚动收集
-		autoScrollChatListAndCollect(userSelectPanel, appendRows, onDone);
+		if (getPageType() === 'chat') {
+			collectChatPageUsers(userSelectPanel, appendRows, onDone);
+		} else {
+			autoScrollChatListAndCollect(userSelectPanel, appendRows, onDone);
+		}
 	}
 
 	// 修改火花天数
@@ -2353,7 +3239,7 @@
 			const days = parseInt(newDays, 10);
 			if (!isNaN(days) && days >= 0) {
 				userConfig.fireDays = days;
-				const today = new Date().toISOString().split('T')[0];
+				const today = getLocalTodayString();
 				userConfig.lastFireDate = today;
 				GM_setValue('fireDays', days);
 				GM_setValue('lastFireDate', today);
@@ -2876,6 +3762,25 @@
                 </div>
 
                 <div class="settings-section">
+                    <h4 style="color: #fff; margin: 0 0 15px 0; font-size: 16px; font-weight: 600;">🌐 发送平台</h4>
+                    <div style="display: flex; flex-direction: column; gap: 10px;">
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="radio" name="send-platform" value="auto" ${userConfig.sendPlatform === 'auto' ? 'checked' : ''} style="margin-right: 10px;">
+                            <span style="color: #ccc;">自动（按当前页面判断）</span>
+                        </label>
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="radio" name="send-platform" value="chat" ${userConfig.sendPlatform === 'chat' ? 'checked' : ''} style="margin-right: 10px;">
+                            <span style="color: #ccc;">仅主站私信页 douyin.com/chat</span>
+                        </label>
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="radio" name="send-platform" value="creator" ${userConfig.sendPlatform === 'creator' ? 'checked' : ''} style="margin-right: 10px;">
+                            <span style="color: #ccc;">仅创作者中心</span>
+                        </label>
+                    </div>
+                    <div style="font-size: 12px; color: #999; margin-top: 8px;">选定平台后，另一个平台的页面不会执行发送；两套界面的用户名单分开保存，需分别配置</div>
+                </div>
+
+                <div class="settings-section">
                     <h4 style="color: #fff; margin: 0 0 15px 0; font-size: 16px; font-weight: 600;">🔄 重试设置</h4>
                     <div style="margin-bottom: 15px;">
                         <label style="display: block; margin-bottom: 8px; color: #ccc; font-weight: 500;">最大重试次数</label>
@@ -3077,9 +3982,9 @@
                     </div>
 
                     <div id="target-user-container" style="margin-bottom: 15px;">
-                        <label style="display: block; margin-bottom: 8px; color: #ccc; font-weight: 500;">目标用户名（一行一个）</label>
-                        <textarea id="dy-fire-settings-target-user" style="width: 100%; height: 100px; padding: 12px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; resize: vertical; box-sizing: border-box; color: #fff; font-size: 14px;" placeholder="每行一个用户名">${userConfig.targetUsernames}</textarea>
-                        <div style="font-size: 12px; color: #999; margin-top: 5px;">每行一个用户名，列表不为空时自动启用目标用户查找</div>
+                        <label style="display: block; margin-bottom: 8px; color: #ccc; font-weight: 500;">目标用户名（一行一个，${getPageType() === 'chat' ? '主站私信页：填会话显示的备注名' : '创作者中心：填昵称'}）</label>
+                        <textarea id="dy-fire-settings-target-user" style="width: 100%; height: 100px; padding: 12px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; resize: vertical; box-sizing: border-box; color: #fff; font-size: 14px;" placeholder="每行一个用户名">${getTargetUsernamesText()}</textarea>
+                        <div style="font-size: 12px; color: #999; margin-top: 5px;">两套界面名字体系不同（创作者中心用昵称，主站私信页用备注名），名单分别保存；列表不为空时自动启用目标用户查找</div>
                         
                         <div style="margin-top: 15px;">
                             <label style="display: block; margin-bottom: 8px; color: #ccc; font-weight: 500;">用户发送模式</label>
@@ -3309,6 +4214,7 @@
 		const timeStart = document.getElementById('dy-fire-settings-time-start').value;
 		const timeEnd = document.getElementById('dy-fire-settings-time-end').value;
 		const targetUsernames = document.getElementById('dy-fire-settings-target-user').value;
+		const sendPlatform = document.querySelector('input[name="send-platform"]:checked').value;
 		const multiUserMode = document.querySelector('input[name="multi-user-mode"]:checked').value;
 		const multiUserRetrySame = document.getElementById('dy-fire-settings-multi-retry-same').checked;
 		const clickMethod = document.querySelector('input[name="click-method"]:checked').value;
@@ -3415,11 +4321,17 @@
 			return;
 		}
 
+		if (!['auto', 'chat', 'creator'].includes(sendPlatform)) {
+			addHistoryLog('发送平台取值非法', 'error');
+			return;
+		}
+
+		userConfig.sendPlatform = sendPlatform;
 		userConfig.sendTimeRandom = timeRandom;
 		userConfig.sendTime = timeValue;
 		userConfig.sendTimeRangeStart = timeStart;
 		userConfig.sendTimeRangeEnd = timeEnd;
-		userConfig.targetUsernames = targetUsernames;
+		userConfig[getTargetUsernamesKey()] = targetUsernames;
 		userConfig.multiUserMode = multiUserMode;
 		userConfig.multiUserRetrySame = multiUserRetrySame;
 		userConfig.clickMethod = clickMethod;
@@ -3489,14 +4401,17 @@
 			return;
 		}
 		// 全部处理完毕
-		const successCount = sentUsersToday.length;
-		const failCount = failedUsersToday.length;
+		// 只统计当前界面名单里的用户（两套界面的名字体系不同，共用一份记录）
+		const currentSentUsers = allTargetUsers.filter(u => sentUsersToday.includes(u));
+		const currentFailedUsers = allTargetUsers.filter(u => failedUsersToday.includes(u));
+		const successCount = currentSentUsers.length;
+		const failCount = currentFailedUsers.length;
 		if (failCount === 0) {
 			// 全部成功，已由 tryFindChatInput 成功路径通知，此处不重复
 			return;
 		}
 		addHistoryLog(
-			`所有用户处理完毕：成功 ${successCount}，失败 ${failCount}（${failedUsersToday.join(', ')}）`,
+			`所有用户处理完毕：成功 ${successCount}，失败 ${failCount}（${currentFailedUsers.join(', ')}）`,
 			successCount > 0 ? 'warn' : 'error'
 		);
 		if (successCount === 0 && userConfig.retryAfterMaxReached) {
@@ -3509,6 +4424,34 @@
 		}
 		const status = successCount === 0 ? 'fail' : 'partial_success';
 		notifyScriptB({ mode: 'multi', status, sentCount: successCount, failCount });
+	}
+
+	// 组装回调数据（字段标准化，供调度器解析）
+	function buildCallbackPayload(payload) {
+		const sentUsers = allTargetUsers.filter(user => sentUsersToday.includes(user));
+		const failedUsers = allTargetUsers.filter(user => failedUsersToday.includes(user));
+		const targetMode = userConfig.enableTargetUser && allTargetUsers.length > 0;
+
+		let status = payload.status || 'success';
+		if (status === 'partial_success') {
+			status = 'partial';
+		} else if (status === 'fail') {
+			status = 'all_failed';
+		}
+
+		return Object.assign({
+			timestamp: Date.now(),
+			version: '2.0.5',
+			surface: getPageType(),
+			final: true,
+			mode: targetMode ? 'multi' : 'single',
+			status: status,
+			total: allTargetUsers.length,
+			sentCount: sentUsers.length,
+			failCount: failedUsers.length,
+			failedUsers: failedUsers,
+			totalSent: sentUsers.length
+		}, payload, { status: status });
 	}
 
 	// 通知后端调度器（调度器）当前账号所有任务已完成
@@ -3527,7 +4470,7 @@
 			method: 'POST',
 			url: `http://localhost:${port}/done`,
 			headers: { 'Content-Type': 'application/json' },
-			data: JSON.stringify(Object.assign({ timestamp: Date.now() }, payload)),
+			data: JSON.stringify(buildCallbackPayload(payload)),
 			timeout: 5000,
 			onerror: () => {
 				addHistoryLog('通知后端调度器失败（连接错误）', 'error');
@@ -3537,7 +4480,13 @@
 				addHistoryLog('通知后端调度器超时', 'error');
 				onBackendUnavailable();
 			},
-			onload: (res) => addHistoryLog(`已通知后端调度器，响应: ${res.status}`, 'info')
+			onload: (res) => {
+				if (res.status >= 200 && res.status < 300) {
+					addHistoryLog(`已通知后端调度器，响应: ${res.status}`, 'info');
+				} else {
+					addHistoryLog(`后端调度器响应异常: ${res.status}`, 'warn');
+				}
+			}
 		});
 	}
 
@@ -3621,6 +4570,10 @@
 		}
 
 		addHistoryLog('抖音续火助手已启动', 'info');
+		addHistoryLog(`发送平台: ${getPlatformLabel(userConfig.sendPlatform)}（当前页面: ${getPageType()}）`, 'info');
+		if (!isCurrentPlatformEnabled()) {
+			addHistoryLog('当前页面不在所选平台内，本页面不会执行发送', 'warn');
+		}
 
 		// 启动时立即检查是否已完成，通知后端调度器（不受发送时间约束）
 		if (userConfig.enableScriptBCallback) {
