@@ -1736,52 +1736,27 @@
 	async function clearSlateEditor(editor) {
 		const isEmpty = () => editor.textContent.replace(/\u200b/g, '').trim() === '';
 
-		editor.focus();
-		try {
-			const selection = window.getSelection();
-			const range = document.createRange();
-			range.selectNodeContents(editor);
-			selection.removeAllRanges();
-			selection.addRange(range);
-			document.execCommand('delete');
-		} catch (error) {
-			addHistoryLog(`清空输入框失败: ${error.message}`, 'warn');
-		}
-		await sleep(80);
-
-		if (isEmpty()) {
-			return true;
-		}
-
-		// 重建空的编辑行
-		try {
-			const emptyLine = document.createElement('div');
-			emptyLine.className = 'ace-line';
-			emptyLine.setAttribute('data-node', 'true');
-			emptyLine.setAttribute('dir', 'auto');
-
-			const emptySpan = document.createElement('span');
-			emptySpan.setAttribute('data-string', 'true');
-			emptySpan.setAttribute('data-enter', 'true');
-			emptySpan.setAttribute('data-leaf', 'true');
-			emptyLine.appendChild(emptySpan);
-
-			while (editor.firstChild) {
-				editor.removeChild(editor.firstChild);
+		for (let attempt = 0; attempt < 3; attempt++) {
+			editor.focus();
+			try {
+				const selection = window.getSelection();
+				const range = document.createRange();
+				range.selectNodeContents(editor);
+				selection.removeAllRanges();
+				selection.addRange(range);
+				document.execCommand('delete');
+			} catch (error) {
+				addHistoryLog(`清空输入框失败: ${error.message}`, 'warn');
 			}
-			editor.appendChild(emptyLine);
-			editor.dispatchEvent(new InputEvent('input', {
-				bubbles: true,
-				cancelable: true,
-				inputType: 'deleteContentBackward'
-			}));
-			await sleep(80);
-			addHistoryLog('输入框原有内容未能删除，已强制清空', 'warn');
-		} catch (error) {
-			addHistoryLog(`强制清空输入框失败: ${error.message}`, 'error');
+			await sleep(150);
+
+			if (isEmpty()) {
+				return true;
+			}
 		}
 
-		return isEmpty();
+		addHistoryLog('输入框内容未能清空，取消本次发送', 'error');
+		return false;
 	}
 
 	// 读取输入框内的每一行
@@ -1808,41 +1783,6 @@
 			return false;
 		}
 		return expected.every((line, index) => line === actual[index]);
-	}
-
-	// 按编辑器自身的行结构直接构建多行内容
-	function buildLinesInSlateEditor(editor, message) {
-		try {
-			const fragment = document.createDocumentFragment();
-			for (const line of String(message).split('\n')) {
-				const lineEl = document.createElement('div');
-				lineEl.className = 'ace-line';
-				lineEl.setAttribute('data-node', 'true');
-				lineEl.setAttribute('dir', 'auto');
-
-				const span = document.createElement('span');
-				span.setAttribute('data-string', 'true');
-				span.setAttribute('data-leaf', 'true');
-				span.textContent = line.trim() || '\u200b';
-				lineEl.appendChild(span);
-				fragment.appendChild(lineEl);
-			}
-
-			while (editor.firstChild) {
-				editor.removeChild(editor.firstChild);
-			}
-			editor.appendChild(fragment);
-			editor.dispatchEvent(new InputEvent('input', {
-				bubbles: true,
-				cancelable: true,
-				inputType: 'insertText',
-				data: String(message)
-			}));
-			return true;
-		} catch (error) {
-			addHistoryLog(`直接构建输入内容失败: ${error.message}`, 'warn');
-			return false;
-		}
 	}
 
 	// 当前浏览器能否构造带数据的粘贴事件
@@ -1934,57 +1874,122 @@
 		return editor.textContent.replace(/\u200b/g, '').trim().length > 0;
 	}
 
-	// 主站私信页写入消息，写入结果按行校验
-	async function writeMessageToSlateEditor(editor, message) {
-		if (!editor) {
-			return false;
-		}
+	// 在输入框内插入换行，逐种输入命令尝试
+	async function insertChatLineBreak(editor) {
+		const lineCount = () => readEditorLines(editor).length;
+		const before = lineCount();
 
-		if (!await clearSlateEditor(editor)) {
-			addHistoryLog('输入框清空失败，取消本次发送以避免发出脏内容', 'error');
-			return false;
-		}
+		const commands = [
+			() => document.execCommand('insertParagraph'),
+			() => document.execCommand('insertHTML', false, '<br>'),
+			() => document.execCommand('insertText', false, '\n')
+		];
 
-		if (canSimulatePaste() && await pasteTextToSlateEditor(editor, message)) {
-			return true;
-		}
-
-		if (!canSimulatePaste()) {
-			addHistoryLog('当前浏览器不支持构造粘贴事件，按行构建输入内容', 'info');
-		}
-
-		if (!await clearSlateEditor(editor)) {
-			addHistoryLog('输入框清空失败，取消本次发送以避免发出脏内容', 'error');
-			return false;
-		}
-
-		if (buildLinesInSlateEditor(editor, message)) {
-			await sleep(200);
-			if (isEditorContentEqual(editor, message)) {
-				addHistoryLog('粘贴不可用，已按行构建输入内容', 'warn');
+		for (const command of commands) {
+			try {
+				command();
+			} catch (error) {
+				continue;
+			}
+			await sleep(150);
+			if (lineCount() > before) {
 				return true;
 			}
-			addHistoryLog('按行构建后的内容与预期不符，改为逐字符写入', 'warn');
 		}
 
-		const lines = getMessageLines(message);
-		if (lines.length > 1) {
-			addHistoryLog('多行内容写入失败，取消本次发送以免丢失换行', 'error');
+		try {
+			editor.dispatchEvent(new InputEvent('beforeinput', {
+				bubbles: true,
+				cancelable: true,
+				inputType: 'insertLineBreak'
+			}));
+		} catch (error) {
 			return false;
 		}
+		await sleep(200);
+		return lineCount() > before;
+	}
 
-		const singleLine = lines[0] || '';
-		if (!await clearSlateEditor(editor)) {
-			addHistoryLog('输入框清空失败，取消本次发送以避免发出脏内容', 'error');
-			return false;
+	// 逐行输入并在行间插入换行
+	async function typeLinesWithLineBreaks(editor, lines) {
+		for (let index = 0; index < lines.length; index++) {
+			if (index > 0 && !await insertChatLineBreak(editor)) {
+				return false;
+			}
+			if (lines[index] && !await typeTextToSlateEditor(editor, lines[index])) {
+				return false;
+			}
 		}
 
-		if (!await typeTextToSlateEditor(editor, singleLine) || !isEditorContentEqual(editor, singleLine)) {
-			addHistoryLog('写入结果与预期不符，取消本次发送', 'error');
-			return false;
+		await sleep(200);
+		return isEditorContentEqual(editor, lines.join('\n'));
+	}
+
+	// 逐行分别发送（输入框无法插入换行时使用）
+	async function sendChatLinesIndividually(editor, lines, targetUser) {
+		const contentLines = lines.filter(line => line.trim().length > 0);
+
+		for (let index = 0; index < contentLines.length; index++) {
+			const line = contentLines[index];
+
+			if (!await clearSlateEditor(editor)) {
+				addHistoryLog('输入框清空失败，停止逐行发送', 'error');
+				return false;
+			}
+			if (!await typeTextToSlateEditor(editor, line) || !isEditorContentEqual(editor, line)) {
+				addHistoryLog(`第 ${index + 1} 行写入失败，停止逐行发送`, 'error');
+				return false;
+			}
+
+			await sleep(500);
+			const sendButton = findComposerSendButton(editor);
+			if (!sendButton) {
+				addHistoryLog('未找到发送按钮，停止逐行发送', 'error');
+				return false;
+			}
+			sendButton.click();
+
+			if (!await confirmSend(editor, line, targetUser, '')) {
+				addHistoryLog(`第 ${index + 1} 行发送未确认，停止逐行发送`, 'error');
+				return false;
+			}
+			addHistoryLog(`第 ${index + 1}/${contentLines.length} 行已发送`, 'info');
 		}
 
 		return true;
+	}
+
+	// 主站私信页写入消息，返回 ok / split / failed
+	async function writeMessageToSlateEditor(editor, message) {
+		if (!editor) {
+			return 'failed';
+		}
+
+		const lines = getMessageLines(message);
+
+		if (!await clearSlateEditor(editor)) {
+			addHistoryLog('输入框清空失败，取消本次发送以避免发出脏内容', 'error');
+			return 'failed';
+		}
+
+		if (canSimulatePaste() && await pasteTextToSlateEditor(editor, message)) {
+			return 'ok';
+		}
+
+		if (lines.length === 1) {
+			if (await typeTextToSlateEditor(editor, lines[0]) && isEditorContentEqual(editor, lines[0])) {
+				return 'ok';
+			}
+			addHistoryLog('单行内容写入失败，取消本次发送', 'error');
+			return 'failed';
+		}
+
+		if (await typeLinesWithLineBreaks(editor, lines)) {
+			return 'ok';
+		}
+
+		addHistoryLog('输入框无法插入换行，改为逐行发送', 'warn');
+		return 'split';
 	}
 
 	// 主站私信页发送按钮（输入框同容器内的最后一个按钮）
@@ -2061,7 +2066,23 @@
 
 		currentState = 'sending';
 
-		if (!await writeMessageToSlateEditor(editor, messageToSend)) {
+		const writeResult = await writeMessageToSlateEditor(editor, messageToSend);
+
+		if (writeResult === 'split') {
+			if (!await sendChatLinesIndividually(editor, getMessageLines(messageToSend), sendTargetUser)) {
+				addHistoryLog('逐行发送未完成，不计为已发送，稍后重试', 'error');
+				updateUserStatus('发送未确认', false);
+				currentState = 'idle';
+				isProcessing = false;
+				setTimeout(executeSendProcess, 5000);
+				return;
+			}
+
+			completeSend(sendTargetUser);
+			return;
+		}
+
+		if (writeResult !== 'ok') {
 			addHistoryLog('消息未写入输入框，取消本次发送', 'error');
 			updateUserStatus('写入失败', false);
 			currentState = 'idle';
