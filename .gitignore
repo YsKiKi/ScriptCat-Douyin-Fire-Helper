@@ -1,0 +1,12 @@
+# 本地文件（.gitignore 自身也只在本地生效）
+.gitignore
+server.nowRun/
+
+# Python 运行产物
+__pycache__/
+*.pyc
+last_callback.json
+
+# 调度器日志
+logs/
+*.log
